@@ -104,7 +104,12 @@ for env_var in POSTGRES_PASSWORD REDIS_PASSWORD; do
     echo "${env_var}=${password}" >> .env
   fi
 done
-grep -q '^SYSREPTOR_POSTGRES_VERSION=' .env || echo "SYSREPTOR_POSTGRES_VERSION=18" >> .env
+# Must match the pg_dump/pg_restore CLIENT version baked into the syslifters/sysreptor app
+# image (currently 17.x), not just "whatever's newest" - PostgreSQL's pg_dump hard-refuses to
+# dump from a server NEWER than itself (a different, harder failure than the older-client-vs-
+# older-server case, which just needs defensive SQL filtering - see backup_engine.py). Verify
+# this still matches after any SysReptor upgrade: `docker exec sysreptor-app pg_dump --version`.
+grep -q '^SYSREPTOR_POSTGRES_VERSION=' .env || echo "SYSREPTOR_POSTGRES_VERSION=17" >> .env
 grep -q '^BIND_PORT=' .env || echo 'BIND_PORT=0.0.0.0:8000:8000' >> .env
 
 rm -f docker-compose.override.yml 2>/dev/null || true
