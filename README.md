@@ -29,8 +29,8 @@ SysReptor stays on the normal upstream path.
 ## Install
 
 ```bash
-git clone [(https://github.com/b3ng0x/sysreptor-custom-install.git)](https://github.com/b3ng0x/sysreptor-custom-install.git)
-cd [https://github.com/b3ng0x/sysreptor-custom-install.git](https://github.com/b3ng0x/sysreptor-custom-install.git)
+git clone https://github.com/b3ng0x/sysreptor-custom-install.git
+cd sysreptor-custom-install
 sudo ./install.sh
 ```
 
