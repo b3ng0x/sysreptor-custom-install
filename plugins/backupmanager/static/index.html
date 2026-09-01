@@ -1,0 +1,325 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Backups</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 0; padding: 20px; background: #fafafa; color: #222; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 15px; margin-top: 28px; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  .card { background: white; border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; min-width: 140px; }
+  .card .label { font-size: 11px; color: #777; text-transform: uppercase; }
+  .card .value { font-size: 16px; font-weight: 600; }
+  .ok { color: #1a7f37; }
+  .bad { color: #b3261e; }
+  button { background: #2563eb; color: white; border: none; border-radius: 4px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
+  button:disabled { background: #999; cursor: not-allowed; }
+  button.danger { background: #b3261e; }
+  table { border-collapse: collapse; width: 100%; background: white; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #eee; font-size: 13px; }
+  th { background: #f0f0f0; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .pill.success { background: #dcfce7; color: #166534; }
+  .pill.failed { background: #fee2e2; color: #991b1b; }
+  .pill.running { background: #fef9c3; color: #854d0e; }
+  #status-msg { margin: 10px 0; font-size: 13px; }
+  .notif-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; margin: 10px 0; border-radius: 6px; font-size: 14px; font-weight: 500;
+    border: 1px solid transparent;
+  }
+  .notif-bar.notif-success { background: #dcfce7; color: #166534; border-color: #86efac; }
+  .notif-bar.notif-error { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+  .notif-bar.notif-info { background: #dbeafe; color: #1e40af; border-color: #93c5fd; }
+  .notif-bar .notif-close { cursor: pointer; font-weight: 700; padding: 0 4px; opacity: 0.6; }
+  .notif-bar .notif-close:hover { opacity: 1; }
+  .pagination { display: flex; align-items: center; gap: 10px; margin: 10px 0; font-size: 13px; }
+  .destdetail { font-size: 11px; color: #666; }
+  input[type=file], input[type=text] { font-size: 13px; padding: 4px; }
+</style>
+</head>
+<body>
+<h1>Backups</h1>
+<div id="status-msg"></div>
+
+<div class="cards" id="summary-cards"></div>
+
+<div id="dest-toggles" style="margin: 10px 0; font-size: 13px;">
+  <label style="margin-right: 14px;"><input type="checkbox" id="dest-discord" checked> Discord</label>
+  <label style="margin-right: 14px;"><input type="checkbox" id="dest-github" checked> GitHub</label>
+  <label style="margin-right: 14px;"><input type="checkbox" id="dest-gdrive" checked> Google Drive</label>
+</div>
+<button id="btn-trigger">Run manual backup now</button>
+
+<h2>History</h2>
+<table>
+  <thead><tr><th>Started</th><th>Trigger</th><th>Status</th><th>Size</th><th>Discord</th><th>GitHub</th><th>Google Drive</th><th>Error</th></tr></thead>
+  <tbody id="history-body"></tbody>
+</table>
+<div class="pagination">
+  <button id="btn-history-prev">&larr; Previous</button>
+  <span id="history-page-label">Page 1</span>
+  <button id="btn-history-next">Next &rarr;</button>
+</div>
+
+<h2>Local backups (restore)</h2>
+<p><button class="danger" id="btn-clear-local">Clear all local backups</button></p>
+<table>
+  <thead><tr><th>Filename</th><th>Size</th><th></th><th></th></tr></thead>
+  <tbody id="local-body"></tbody>
+</table>
+
+<h2>Restore from uploaded file</h2>
+<p>
+  <input type="file" id="restore-file">
+  <input type="text" id="restore-key" placeholder="AES key (hex) - leave blank to use server's current key">
+  <button class="danger" id="btn-restore-upload">Restore uploaded file</button>
+</p>
+
+<script>
+const PLUGIN_ID = 'f413e156-1b86-4b57-a959-427413861cab';
+const API = `/api/plugins/${PLUGIN_ID}/api`;
+
+function fmtBytes(n) {
+  if (n == null) return '-';
+  const units = ['B','KB','MB','GB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(1)} ${units[i]}`;
+}
+
+let notifDismissTimer = null;
+
+// type: 'success' | 'error' | 'info'. Renders a real dismissible banner (not just colored text),
+// so restore/backup outcomes are actually noticeable rather than a subtle line of text.
+// autoDismissMs: 0 to keep it visible until manually closed (used for errors, so they don't
+// disappear before the user reads them) or a duration for success/info messages.
+function notify(text, type, autoDismissMs) {
+  const el = document.getElementById('status-msg');
+  if (notifDismissTimer) { clearTimeout(notifDismissTimer); notifDismissTimer = null; }
+  el.innerHTML = `
+    <div class="notif-bar notif-${type}">
+      <span>${text}</span>
+      <span class="notif-close" onclick="this.parentElement.remove()">&times;</span>
+    </div>
+  `;
+  if (autoDismissMs) {
+    notifDismissTimer = setTimeout(() => { el.innerHTML = ''; }, autoDismissMs);
+  }
+}
+
+// Back-compat wrapper - kept so existing call sites (isError boolean) still work.
+function setMsg(text, isError) {
+  notify(text, isError ? 'error' : 'info', isError ? 0 : 5000);
+}
+
+async function api(path, opts) {
+  const resp = await fetch(`${API}/${path}`, Object.assign({ credentials: 'same-origin' }, opts));
+  let data = null;
+  try { data = await resp.json(); } catch (e) {}
+  if (!resp.ok) throw new Error((data && data.detail) || `HTTP ${resp.status}`);
+  return data;
+}
+
+function destCell(results, key) {
+  if (!results || !results[key]) return '-';
+  const r = results[key];
+  if (r.ok === null) {
+    return `<span style="color:#999;">SKIPPED</span><div class="destdetail">${(r.detail||'').slice(0,60)}</div>`;
+  }
+  const cls = r.ok ? 'ok' : 'bad';
+  return `<span class="${cls}">${r.ok ? 'OK' : 'FAIL'}</span><div class="destdetail">${(r.detail||'').slice(0,60)}</div>`;
+}
+
+async function refreshSummary() {
+  const s = await api('runs/status_summary/');
+  document.getElementById('summary-cards').innerHTML = `
+    <div class="card"><div class="label">Daily backup</div><div class="value ${s.daily_enabled ? 'ok' : 'bad'}">${s.daily_enabled ? 'Enabled' : 'Disabled'}</div></div>
+    <div class="card"><div class="label">Discord</div><div class="value ${s.discord_configured ? 'ok' : 'bad'}">${s.discord_configured ? 'Configured' : 'Not set'}</div></div>
+    <div class="card"><div class="label">GitHub</div><div class="value ${s.github_configured ? 'ok' : 'bad'}">${s.github_configured ? 'Configured' : 'Not set'}</div></div>
+    <div class="card"><div class="label">Google Drive</div><div class="value ${s.gdrive_configured ? 'ok' : 'bad'}">${s.gdrive_configured ? 'Configured' : 'Not set'}</div></div>
+    <div class="card"><div class="label">Local backups</div><div class="value">${s.local_backup_count}</div></div>
+  `;
+  document.getElementById('btn-trigger').disabled = s.backup_running;
+  if (s.backup_running) setMsg('A backup is currently running...', false);
+}
+
+// The underlying API uses cursor pagination (opaque next/previous URLs, no total count - not
+// page-number based). We fetch server pages lazily as the user pages forward and cache
+// everything seen so far in historyRows, so Previous is instant (no refetch) and Next only hits
+// the server when we've actually run out of locally-cached rows.
+const HISTORY_PAGE_SIZE = 10;
+let historyRows = [];
+let historyServerCursor = null; // next server-page URL, or null if the server has no more
+let historyPage = 0; // 0-indexed
+
+function historyRowHtml(r) {
+  return `
+    <tr>
+      <td>${new Date(r.started).toLocaleString()}</td>
+      <td>${r.trigger}</td>
+      <td><span class="pill ${r.status}">${r.status}</span></td>
+      <td>${fmtBytes(r.size_bytes)}</td>
+      <td>${destCell(r.destination_results, 'discord')}</td>
+      <td>${destCell(r.destination_results, 'github')}</td>
+      <td>${destCell(r.destination_results, 'gdrive')}</td>
+      <td>${r.error_message ? `<span class="bad">${r.error_message.slice(0,80)}</span>` : '-'}</td>
+    </tr>
+  `;
+}
+
+function renderHistoryPage() {
+  const start = historyPage * HISTORY_PAGE_SIZE;
+  const pageRows = historyRows.slice(start, start + HISTORY_PAGE_SIZE);
+  document.getElementById('history-body').innerHTML = pageRows.map(historyRowHtml).join('')
+    || '<tr><td colspan="8">No backup history yet</td></tr>';
+  document.getElementById('history-page-label').textContent = `Page ${historyPage + 1}`;
+  document.getElementById('btn-history-prev').disabled = historyPage === 0;
+  const hasMoreOnThisSideAlready = historyRows.length > start + HISTORY_PAGE_SIZE;
+  document.getElementById('btn-history-next').disabled = !hasMoreOnThisSideAlready && !historyServerCursor;
+}
+
+// Fetches server pages until we have enough rows cached to show the given page, or the server
+// runs out (historyServerCursor becomes null).
+async function ensureRowsForPage(page) {
+  const needed = (page + 1) * HISTORY_PAGE_SIZE;
+  while (historyRows.length < needed && historyServerCursor) {
+    const resp = await fetch(historyServerCursor, { credentials: 'same-origin' });
+    const data = await resp.json();
+    historyRows = historyRows.concat(data.results || []);
+    historyServerCursor = data.next || null;
+  }
+}
+
+async function refreshHistory() {
+  const runs = await api('runs/');
+  historyRows = runs.results || runs;
+  historyServerCursor = runs.next || null;
+  historyPage = 0;
+  renderHistoryPage();
+}
+
+async function goToHistoryPage(delta) {
+  const target = historyPage + delta;
+  if (target < 0) return;
+  await ensureRowsForPage(target);
+  if (target * HISTORY_PAGE_SIZE >= historyRows.length) return; // truly nothing there, ignore
+  historyPage = target;
+  renderHistoryPage();
+}
+
+async function refreshLocal() {
+  const files = await api('runs/local_backups/');
+  document.getElementById('local-body').innerHTML = files.map(f => `
+    <tr>
+      <td>${f.filename}</td>
+      <td>${fmtBytes(f.size_bytes)}</td>
+      <td><button onclick="downloadLocal('${f.filename}')">Download</button></td>
+      <td><button class="danger" onclick="restoreLocal('${f.filename}')">Restore this</button></td>
+    </tr>
+  `).join('') || '<tr><td colspan="4">No local backups yet</td></tr>';
+}
+
+async function refreshAll() {
+  await Promise.all([refreshSummary(), refreshHistory(), refreshLocal()]);
+}
+
+// Lighter periodic tick: summary + local files only. Deliberately does NOT touch history,
+// so it doesn't stomp on the user's "Load more" progress every 15s.
+async function refreshLight() {
+  await Promise.all([refreshSummary(), refreshLocal()]);
+}
+
+window.downloadLocal = async function(filename) {
+  setMsg(`Downloading ${filename}...`, false);
+  try {
+    const resp = await fetch(`${API}/runs/download-local/?filename=${encodeURIComponent(filename)}`, { credentials: 'same-origin' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setMsg(`Downloaded ${filename}.`, false);
+  } catch (e) {
+    setMsg(`Download failed: ${e.message}`, true);
+  }
+};
+
+window.restoreLocal = async function(filename) {
+  if (!confirm(`This will OVERWRITE the current database and files with the contents of "${filename}". Continue?`)) return;
+  notify(`Restoring ${filename}...`, 'info', 0);
+  try {
+    await api('runs/restore-local/', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ filename }) });
+    notify(`✔ Restoration succeeded: "${filename}" has been restored.`, 'success', 8000);
+  } catch (e) {
+    notify(`✘ Restoration failed: ${e.message}`, 'error', 0);
+  }
+  await refreshAll();
+};
+
+document.getElementById('btn-trigger').addEventListener('click', async () => {
+  const destinations = [];
+  if (document.getElementById('dest-discord').checked) destinations.push('discord');
+  if (document.getElementById('dest-github').checked) destinations.push('github');
+  if (document.getElementById('dest-gdrive').checked) destinations.push('gdrive');
+  // Empty selection is valid - it just means "local backup only, upload to nothing".
+
+  document.getElementById('btn-trigger').disabled = true;
+  notify('Running backup, this can take a while for large installs...', 'info', 0);
+  try {
+    await api('runs/trigger/', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ destinations }),
+    });
+    notify('✔ Backup completed successfully.', 'success', 8000);
+  } catch (e) {
+    notify(`✘ Backup failed: ${e.message}`, 'error', 0);
+  }
+  await refreshAll();
+});
+
+document.getElementById('btn-restore-upload').addEventListener('click', async () => {
+  const fileInput = document.getElementById('restore-file');
+  const key = document.getElementById('restore-key').value.trim();
+  if (!fileInput.files.length) { setMsg('Choose a file first.', true); return; }
+  if (!confirm('This will OVERWRITE the current database and files with the uploaded backup. Continue?')) return;
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+  if (key) fd.append('key', key);
+  notify(`Restoring uploaded file "${fileInput.files[0].name}"...`, 'info', 0);
+  try {
+    await api('runs/restore-upload/', { method: 'POST', body: fd });
+    notify(`✔ Restoration succeeded: "${fileInput.files[0].name}" has been restored.`, 'success', 8000);
+  } catch (e) {
+    notify(`✘ Restoration failed: ${e.message}`, 'error', 0);
+  }
+  await refreshAll();
+});
+
+document.getElementById('btn-history-prev').addEventListener('click', () => goToHistoryPage(-1));
+document.getElementById('btn-history-next').addEventListener('click', () => goToHistoryPage(1));
+
+document.getElementById('btn-clear-local').addEventListener('click', async () => {
+  if (!confirm('Delete ALL local backup copies from this server? This does not touch anything already uploaded to Discord/GitHub/Google Drive - only local retention.')) return;
+  setMsg('Clearing local backups...', false);
+  try {
+    const r = await api('runs/clear-local/', { method: 'POST' });
+    setMsg(`Deleted ${r.count} local backup file(s).`, false);
+  } catch (e) {
+    setMsg(`Clear failed: ${e.message}`, true);
+  }
+  await refreshLocal();
+});
+
+refreshAll();
+setInterval(refreshLight, 15000);
+</script>
+</body>
+</html>

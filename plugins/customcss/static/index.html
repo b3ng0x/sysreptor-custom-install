@@ -1,0 +1,937 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Custom CSS</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 0; padding: 20px; background: #fafafa; color: #222; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 15px; margin-top: 28px; }
+  p.hint { font-size: 12px; color: #666; }
+  textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: 13px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+  #css-editor { height: 260px; }
+  button { background: #2563eb; color: white; border: none; border-radius: 4px; padding: 8px 16px; font-size: 14px; cursor: pointer; margin-right: 8px; }
+  button.secondary { background: #64748b; }
+  button.danger { background: #b3261e; }
+  button:disabled { background: #999; cursor: not-allowed; }
+  #status-msg { margin: 10px 0; font-size: 13px; min-height: 18px; }
+  .ok { color: #1a7f37; }
+  .bad { color: #b3261e; }
+  label.row { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 13px; }
+  .preset-card { background: white; border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px; max-width: 420px; margin-bottom: 10px; }
+  .preset-card h3 { margin: 0 0 6px 0; font-size: 14px; }
+  .preset-card p { margin: 0 0 10px 0; font-size: 12px; color: #555; }
+</style>
+</head>
+<body>
+<h1>Custom CSS</h1>
+<p class="hint">
+  Injects raw CSS app-wide (every page, for every user) - not just this settings page.
+  For colors/logo that Vuetify already exposes as theme variables, the official
+  <b>customizetheme</b> plugin (also enabled) may be a better fit; use this for anything beyond that.
+</p>
+<div id="status-msg"></div>
+
+<h2>Your CSS</h2>
+<textarea id="css-editor" placeholder="/* e.g. */
+.v-app-bar { border-bottom: 2px solid #ff6600 !important; }
+.v-btn { border-radius: 2px !important; }"></textarea>
+<label class="row"><input type="checkbox" id="css-enabled"> Enabled (applies for everyone once saved)</label>
+<p>
+  <button id="btn-preview">Preview (this browser only, not saved)</button>
+  <button id="btn-save">Keep (save for everyone)</button>
+  <button class="secondary" id="btn-clear-preview">Clear preview</button>
+  <button class="danger" id="btn-reset">Reset to none</button>
+</p>
+
+<h2>Presets</h2>
+<div class="preset-card">
+  <h3>Matrix Dark Theme</h3>
+  <p>Green-on-black hacker aesthetic. Applies via the official customizetheme plugin's JSON theme
+     config (dark mode text colors), not raw CSS - "Keep" here writes to that plugin's own setting.</p>
+  <button id="btn-preset-preview">Preview</button>
+  <button class="secondary" id="btn-preset-keep">Keep this preset</button>
+</div>
+<div class="preset-card">
+  <h3>Cyberpunk Neon</h3>
+  <p>Full app-wide neon-green-on-black theme (app bar, nav drawer, buttons, switches, cards, tables,
+     tabs, tooltips, dialogs, and more) via raw CSS - "Keep" here writes to this plugin's own CUSTOM_CSS
+     setting, same as the main editor above. Does not touch severity/risk colors on findings.</p>
+  <button id="btn-cyberpunk-preview">Preview</button>
+  <button class="secondary" id="btn-cyberpunk-keep">Keep this preset</button>
+</div>
+
+<script>
+const PLUGIN_ID = 'a3d34829-b4a1-4d80-8e81-269850972f23';
+const API = `/api/plugins/${PLUGIN_ID}/api`;
+const CORE_CONFIG_API = '/api/v1/utils/configuration/';
+const PARENT_STYLE_ID = 'plugin-customcss-style-preview';
+const PARENT_PRESET_STYLE_ID = 'plugin-customcss-preset-preview';
+
+const MATRIX_PRESET = {
+  dark: {
+    colors: {
+      'on-background': '#74ee15',
+      'on-surface': '#74ee15',
+      'on-drawer': '#74ee15',
+      'on-header': '#74ee15',
+    },
+  },
+};
+// Same variable names customizetheme's own commented-out example uses, for the live preview
+// (bypasses needing to touch Vuetify's reactive theme object from a cross-frame parent, which
+// customizetheme achieves via `options.theme` inside its own plugin.js - we approximate visually
+// with the equivalent CSS custom properties instead, good enough for a preview).
+const MATRIX_PREVIEW_CSS = `
+:root, .v-theme--dark {
+  --v-theme-on-background: 116,238,21;
+  --v-theme-on-surface: 116,238,21;
+}
+`;
+
+function setMsg(text, isError) {
+  const el = document.getElementById('status-msg');
+  el.textContent = text;
+  el.className = isError ? 'bad' : 'ok';
+}
+
+async function api(path, opts) {
+  const resp = await fetch(`${API}/${path}`, Object.assign({ credentials: 'same-origin' }, opts));
+  let data = null;
+  try { data = await resp.json(); } catch (e) {}
+  if (!resp.ok) throw new Error((data && data.detail) || `HTTP ${resp.status}`);
+  return data;
+}
+
+function applyToParent(styleId, css) {
+  const doc = window.parent.document;
+  let el = doc.getElementById(styleId);
+  if (!css) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = doc.createElement('style');
+    el.id = styleId;
+    doc.head.appendChild(el);
+  }
+  el.textContent = css;
+}
+
+async function loadCurrent() {
+  try {
+    const data = await api('config/');
+    document.getElementById('css-editor').value = data.css || '';
+    document.getElementById('css-enabled').checked = !!data.enabled;
+  } catch (e) {
+    setMsg(`Failed to load current settings: ${e.message}`, true);
+  }
+}
+
+document.getElementById('btn-preview').addEventListener('click', () => {
+  const css = document.getElementById('css-editor').value;
+  applyToParent(PARENT_STYLE_ID, css);
+  setMsg('Previewing in this browser only - reload the app or click "Clear preview" to remove it. Not saved yet.', false);
+});
+
+document.getElementById('btn-clear-preview').addEventListener('click', () => {
+  applyToParent(PARENT_STYLE_ID, '');
+  applyToParent(PARENT_PRESET_STYLE_ID, '');
+  setMsg('Preview cleared.', false);
+});
+
+document.getElementById('btn-save').addEventListener('click', async () => {
+  const css = document.getElementById('css-editor').value;
+  const enabled = document.getElementById('css-enabled').checked;
+  setMsg('Saving...', false);
+  try {
+    await api('config/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ css, enabled }),
+    });
+    setMsg('Saved. Applied app-wide immediately (no restart needed) - reload any open tab to see it.', false);
+  } catch (e) {
+    setMsg(`Save failed: ${e.message}`, true);
+  }
+});
+
+document.getElementById('btn-reset').addEventListener('click', async () => {
+  if (!confirm('Clear the saved custom CSS for everyone?')) return;
+  document.getElementById('css-editor').value = '';
+  document.getElementById('css-enabled').checked = false;
+  applyToParent(PARENT_STYLE_ID, '');
+  setMsg('Saving...', false);
+  try {
+    await api('config/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ css: '', enabled: false }),
+    });
+    setMsg('Reset - no custom CSS applied for anyone.', false);
+  } catch (e) {
+    setMsg(`Reset failed: ${e.message}`, true);
+  }
+});
+
+document.getElementById('btn-preset-preview').addEventListener('click', () => {
+  applyToParent(PARENT_PRESET_STYLE_ID, MATRIX_PREVIEW_CSS);
+  setMsg('Previewing Matrix preset in this browser only. Not saved yet.', false);
+});
+
+document.getElementById('btn-preset-keep').addEventListener('click', async () => {
+  if (!confirm('Apply the Matrix Dark Theme preset for everyone (writes to the customizetheme plugin\'s config)?')) return;
+  setMsg('Saving preset...', false);
+  try {
+    const resp = await fetch(CORE_CONFIG_API, {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ PLUGIN_CUSTOMIZETHEME_CONFIG: JSON.stringify(MATRIX_PRESET) }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    setMsg('Matrix preset saved. Switch to dark mode (if not already) and reload to see it everywhere.', false);
+  } catch (e) {
+    setMsg(`Preset save failed: ${e.message}`, true);
+  }
+});
+
+const CYBERPUNK_PRESET_CSS = `:root,
+.v-application,
+.v-theme--light,
+.v-theme--dark {
+--v-theme-primary: 0, 255, 190 !important;
+--v-theme-surface: 10, 18, 24 !important;
+--v-theme-surface-light: 17, 29, 37 !important;
+--v-theme-surface-variant: 24, 39, 48 !important;
+--v-theme-background: 5, 10, 14 !important;
+--v-theme-on-primary: 3, 15, 17 !important;
+--v-theme-on-surface: 225, 239, 238 !important;
+--v-theme-on-background: 214, 230, 229 !important;
+}
+
+html,
+body {
+background: #050a0e !important;
+color: #d6e6e5 !important;
+}
+
+.v-application {
+min-height: 100vh;
+background:
+radial-gradient(
+circle at 82% -10%,
+rgba(0, 255, 190, 0.08),
+transparent 32%
+),
+radial-gradient(
+circle at -10% 100%,
+rgba(0, 170, 255, 0.045),
+transparent 30%
+),
+#050a0e !important;
+color: #d6e6e5 !important;
+}
+
+.v-main {
+background:
+linear-gradient(
+135deg,
+rgba(7, 13, 18, 0.98),
+rgba(5, 10, 14, 1)
+) !important;
+}
+
+.v-app-bar {
+background:
+linear-gradient(
+90deg,
+#071217 0%,
+#0a171d 48%,
+#071217 100%
+) !important;
+color: #d9e9e8 !important;
+border-bottom: 1px solid rgba(0, 255, 190, 0.2) !important;
+box-shadow:
+0 1px 0 rgba(0, 255, 190, 0.05),
+0 8px 30px rgba(0, 0, 0, 0.45) !important;
+backdrop-filter: blur(16px);
+-webkit-backdrop-filter: blur(16px);
+}
+
+.v-app-bar::after {
+content: "";
+position: absolute;
+left: 0;
+right: 0;
+bottom: -1px;
+height: 1px;
+background: linear-gradient(
+90deg,
+transparent 0%,
+rgba(0, 255, 190, 0.7) 50%,
+transparent 100%
+);
+}
+
+.v-app-bar .v-icon {
+color: #00ffbe !important;
+}
+
+.v-app-bar .v-btn {
+color: #d7e8e7 !important;
+}
+
+.v-app-bar .v-btn:hover {
+color: #00ffbe !important;
+background: rgba(0, 255, 190, 0.07) !important;
+}
+
+.v-navigation-drawer {
+background:
+linear-gradient(
+180deg,
+#081218 0%,
+#071016 55%,
+#050b10 100%
+) !important;
+color: #c9dedd !important;
+border-right: 1px solid rgba(0, 255, 190, 0.13) !important;
+box-shadow:
+8px 0 30px rgba(0, 0, 0, 0.3) !important;
+}
+
+.v-navigation-drawer::after {
+content: "";
+position: absolute;
+top: 0;
+right: 0;
+width: 1px;
+height: 100%;
+background: linear-gradient(
+180deg,
+transparent,
+rgba(0, 255, 190, 0.28),
+transparent
+);
+}
+
+.v-navigation-drawer .v-list {
+background: transparent !important;
+padding: 10px 7px !important;
+}
+
+.v-navigation-drawer .v-list-item {
+min-height: 44px;
+margin: 3px 0;
+border-radius: 7px !important;
+color: #9db4b4 !important;
+transition:
+background 160ms ease,
+color 160ms ease,
+transform 160ms ease,
+box-shadow 160ms ease;
+}
+
+.v-navigation-drawer .v-list-item .v-icon {
+color: #759090 !important;
+transition:
+color 160ms ease,
+filter 160ms ease;
+}
+
+.v-navigation-drawer .v-list-item:hover {
+color: #e1efed !important;
+background: rgba(0, 255, 190, 0.055) !important;
+transform: translateX(2px);
+}
+
+.v-navigation-drawer .v-list-item:hover .v-icon {
+color: #00ffbe !important;
+}
+
+.v-navigation-drawer .v-list-item--active {
+color: #00ffbe !important;
+background:
+linear-gradient(
+90deg,
+rgba(0, 255, 190, 0.16),
+rgba(0, 255, 190, 0.045)
+) !important;
+border: 1px solid rgba(0, 255, 190, 0.16) !important;
+box-shadow:
+inset 3px 0 0 #00ffbe,
+0 5px 18px rgba(0, 0, 0, 0.2) !important;
+}
+
+.v-navigation-drawer .v-list-item--active .v-icon {
+color: #00ffbe !important;
+filter: drop-shadow(0 0 6px rgba(0, 255, 190, 0.5));
+}
+
+.v-navigation-drawer .v-list-item--active .v-list-item-title {
+color: #00ffbe !important;
+font-weight: 650;
+}
+
+.v-navigation-drawer .v-list-item__overlay {
+background: transparent !important;
+}
+
+.v-navigation-drawer .v-list-subheader {
+color: #557070 !important;
+font-size: 0.7rem;
+font-weight: 700;
+letter-spacing: 0.14em;
+text-transform: uppercase;
+}
+
+.v-btn {
+border-radius: 6px !important;
+font-weight: 650 !important;
+letter-spacing: 0.02em;
+text-transform: none !important;
+transition:
+transform 150ms ease,
+box-shadow 150ms ease,
+background-color 150ms ease,
+border-color 150ms ease,
+color 150ms ease;
+}
+
+.v-btn:not(.v-btn--disabled) {
+border: 1px solid rgba(0, 255, 190, 0.13);
+}
+
+.v-btn.v-btn--variant-flat,
+.v-btn.v-btn--variant-elevated {
+background: linear-gradient(
+135deg,
+#00e6ac,
+#00c99a
+) !important;
+color: #03100e !important;
+box-shadow:
+0 4px 14px rgba(0, 0, 0, 0.3),
+inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.v-btn.v-btn--variant-flat:hover,
+.v-btn.v-btn--variant-elevated:hover {
+background: linear-gradient(
+135deg,
+#19ffd0,
+#00dfaa
+) !important;
+transform: translateY(-1px);
+box-shadow:
+0 7px 22px rgba(0, 0, 0, 0.35),
+0 0 18px rgba(0, 255, 190, 0.12);
+}
+
+.v-btn.v-btn--variant-outlined {
+color: #00ffbe !important;
+border-color: rgba(0, 255, 190, 0.35) !important;
+background: rgba(0, 255, 190, 0.025) !important;
+}
+
+.v-btn.v-btn--variant-outlined:hover {
+color: #19ffd0 !important;
+border-color: rgba(0, 255, 190, 0.7) !important;
+background: rgba(0, 255, 190, 0.08) !important;
+box-shadow: 0 0 16px rgba(0, 255, 190, 0.07);
+}
+
+.v-btn.v-btn--variant-text {
+color: #b7cccb !important;
+}
+
+.v-btn.v-btn--variant-text:hover {
+color: #00ffbe !important;
+background: rgba(0, 255, 190, 0.065) !important;
+}
+
+.v-btn:active:not(.v-btn--disabled) {
+transform: translateY(0);
+}
+
+.v-btn .v-icon {
+transition:
+color 150ms ease,
+filter 150ms ease;
+}
+
+.v-switch .v-selection-control__input {
+border-radius: 50%;
+transition:
+transform 180ms ease,
+box-shadow 180ms ease;
+}
+
+.v-switch .v-selection-control__input:hover {
+box-shadow:
+0 0 0 7px rgba(0, 255, 190, 0.07);
+}
+
+.v-switch .v-switch__track {
+background: #203139 !important;
+border: 1px solid rgba(145, 176, 177, 0.18);
+opacity: 1 !important;
+transition:
+background 180ms ease,
+border-color 180ms ease;
+}
+
+.v-switch .v-switch__thumb {
+background: #91a8a8 !important;
+box-shadow:
+0 2px 7px rgba(0, 0, 0, 0.45),
+inset 0 1px 1px rgba(255, 255, 255, 0.15);
+transition:
+background 180ms ease,
+box-shadow 180ms ease;
+}
+
+.v-switch .v-selection-control--dirty .v-switch__track {
+background: rgba(0, 255, 190, 0.25) !important;
+border-color: rgba(0, 255, 190, 0.48) !important;
+}
+
+.v-switch .v-selection-control--dirty .v-switch__thumb {
+background: #00ffbe !important;
+box-shadow:
+0 0 12px rgba(0, 255, 190, 0.4),
+0 2px 7px rgba(0, 0, 0, 0.4);
+}
+
+.v-card {
+background:
+linear-gradient(
+145deg,
+rgba(16, 27, 34, 0.98),
+rgba(9, 17, 23, 0.99)
+) !important;
+color: #d6e6e5 !important;
+border: 1px solid rgba(125, 165, 166, 0.12) !important;
+border-radius: 9px !important;
+box-shadow:
+0 8px 30px rgba(0, 0, 0, 0.25),
+inset 0 1px 0 rgba(255, 255, 255, 0.025) !important;
+}
+
+.v-card:hover {
+border-color: rgba(0, 255, 190, 0.18) !important;
+}
+
+.v-card-title {
+color: #e5f2f0 !important;
+font-weight: 650;
+}
+
+.v-card-subtitle {
+color: #829999 !important;
+}
+
+.v-card-text {
+color: #c4d6d5 !important;
+}
+
+.v-list {
+background: #0a1218 !important;
+color: #d3e2e1 !important;
+}
+
+.v-list-item {
+color: #c3d4d3 !important;
+}
+
+.v-list-item:hover {
+background: rgba(0, 255, 190, 0.055) !important;
+}
+
+.v-list-item--active {
+color: #00ffbe !important;
+}
+
+.v-dialog .v-card,
+.v-menu .v-list,
+.v-overlay .v-card {
+border: 1px solid rgba(0, 255, 190, 0.16) !important;
+box-shadow:
+0 20px 60px rgba(0, 0, 0, 0.55),
+0 0 0 1px rgba(0, 255, 190, 0.025) !important;
+}
+
+.v-text-field .v-field,
+.v-textarea .v-field,
+.v-select .v-field,
+.v-autocomplete .v-field {
+background: rgba(5, 12, 16, 0.65) !important;
+border-radius: 7px !important;
+}
+
+.v-field__outline {
+color: rgba(125, 165, 166, 0.25) !important;
+}
+
+.v-field--focused .v-field__outline {
+color: rgba(0, 255, 190, 0.7) !important;
+}
+
+.v-field--focused {
+box-shadow:
+0 0 0 2px rgba(0, 255, 190, 0.065);
+}
+
+.v-chip--variant-tonal {
+background: rgba(0, 255, 190, 0.09) !important;
+color: #00ffbe !important;
+}
+
+.v-divider {
+border-color: rgba(125, 165, 166, 0.12) !important;
+}
+
+a {
+color: #00ffbe !important;
+text-decoration-color: rgba(0, 255, 190, 0.28);
+text-underline-offset: 3px;
+}
+
+a:hover {
+color: #4dffda !important;
+text-decoration-color: rgba(77, 255, 218, 0.65);
+}
+
+::selection {
+background: rgba(0, 255, 190, 0.3);
+color: #effffc;
+}
+
+::-webkit-scrollbar {
+width: 9px;
+height: 9px;
+}
+
+::-webkit-scrollbar-track {
+background: #050a0e;
+}
+
+::-webkit-scrollbar-thumb {
+background: #263940;
+border: 2px solid #050a0e;
+border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+background: #008f77;
+}
+
+html {
+scrollbar-color: #263940 #050a0e;
+}
+
+/* =========================================================================
+   Extended coverage - added after auditing the real running app via
+   Selenium (component classes confirmed present in actual DOM, not
+   guessed): app-bar/nav-drawer/buttons/switches/cards/dialogs/fields were
+   already covered above; this section fills genuine gaps found on the
+   Projects, Templates, Users, Reporting, and Finding-detail pages.
+
+   Deliberately NOT touched: .cvss-score, .cvss-score-header,
+   .finding-level-*, and risk/severity colors in general - these are the
+   app's own self-contained severity indicators (Critical/High/Medium/Low/
+   Info) and must stay exactly as SysReptor renders them for reports to
+   stay readable. No rule below targets them.
+   ========================================================================= */
+
+.v-toolbar {
+  background: linear-gradient(90deg, #071217 0%, #0a171d 48%, #071217 100%) !important;
+  color: #d9e9e8 !important;
+}
+
+.v-toolbar .v-icon {
+  color: #00ffbe !important;
+}
+
+.v-avatar {
+  border: 1px solid rgba(0, 255, 190, 0.25) !important;
+  box-shadow: 0 0 10px rgba(0, 255, 190, 0.12);
+}
+
+.v-badge__badge {
+  background: #00ffbe !important;
+  color: #03100e !important;
+  font-weight: 700;
+  box-shadow: 0 0 8px rgba(0, 255, 190, 0.5);
+}
+
+.v-breadcrumbs {
+  color: #9db4b4 !important;
+}
+
+.v-breadcrumbs-item {
+  color: #b7cccb !important;
+}
+
+.v-breadcrumbs-item--disabled,
+.v-breadcrumbs-item:last-child {
+  color: #00ffbe !important;
+}
+
+.v-breadcrumbs-divider {
+  color: #557070 !important;
+}
+
+/* Checkboxes and radios share v-selection-control with switches, but need
+   their own box/circle treatment (v-switch rules above target the track/
+   thumb shape specifically, which doesn't apply to check/radio icons). */
+.v-checkbox .v-icon,
+.v-radio .v-icon,
+.v-selection-control__input .v-icon {
+  color: #91a8a8 !important;
+  transition: color 160ms ease, filter 160ms ease;
+}
+
+.v-selection-control--dirty .v-icon {
+  color: #00ffbe !important;
+  filter: drop-shadow(0 0 4px rgba(0, 255, 190, 0.45));
+}
+
+.v-empty-state__title {
+  color: #d6e6e5 !important;
+}
+
+.v-empty-state__text {
+  color: #829999 !important;
+}
+
+.v-progress-linear__background {
+  background: #203139 !important;
+  opacity: 1 !important;
+}
+
+.v-progress-linear__indeterminate .long,
+.v-progress-linear__indeterminate .short,
+.v-progress-linear__determinate {
+  background: linear-gradient(90deg, #00c99a, #00ffbe) !important;
+}
+
+.v-progress-circular {
+  color: #00ffbe !important;
+}
+
+.v-tooltip > .v-overlay__content {
+  background: #0a171d !important;
+  color: #d6e6e5 !important;
+  border: 1px solid rgba(0, 255, 190, 0.25) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* Menu/select dropdown panels and dialogs render inside a teleported
+   .v-overlay__content, separate from the trigger element - already partly
+   covered via ".v-menu .v-list" but the overlay's own surface needs it too
+   for consistent edges/shadow beyond just the list inside it. */
+.v-overlay__content > .v-card,
+.v-overlay__content > .v-sheet,
+.v-overlay__content.v-menu > .v-list {
+  background: #0a141a !important;
+  border: 1px solid rgba(0, 255, 190, 0.16) !important;
+}
+
+.v-autocomplete .v-field,
+.v-autocomplete__selection-text {
+  color: #d6e6e5 !important;
+}
+
+.v-btn-group,
+.v-btn-toggle {
+  border: 1px solid rgba(0, 255, 190, 0.18) !important;
+  border-radius: 6px !important;
+  background: rgba(5, 12, 16, 0.4) !important;
+}
+
+.v-btn-group .v-btn--active,
+.v-btn-toggle .v-btn--active {
+  background: rgba(0, 255, 190, 0.16) !important;
+  color: #00ffbe !important;
+}
+
+.v-card-item,
+.v-card-item__content {
+  color: #d6e6e5 !important;
+}
+
+/* Components not confirmed present during this walkthrough but standard
+   Vuetify UI surfaces very likely to appear elsewhere in the app
+   (snackbar/alert notifications, data tables, tabs, pagination,
+   expansion panels) - covered defensively using the same palette. */
+.v-alert {
+  border: 1px solid rgba(0, 255, 190, 0.2) !important;
+  background: rgba(10, 23, 29, 0.95) !important;
+  color: #d6e6e5 !important;
+}
+
+.v-snackbar__wrapper {
+  background: #0a171d !important;
+  color: #d6e6e5 !important;
+  border: 1px solid rgba(0, 255, 190, 0.25) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5) !important;
+}
+
+.v-table,
+.v-data-table {
+  background: transparent !important;
+  color: #d6e6e5 !important;
+}
+
+.v-data-table > .v-table__wrapper > table > thead > tr > th {
+  background: #0a141a !important;
+  color: #9db4b4 !important;
+  border-bottom: 1px solid rgba(0, 255, 190, 0.18) !important;
+}
+
+.v-data-table > .v-table__wrapper > table > tbody > tr:hover > td {
+  background: rgba(0, 255, 190, 0.045) !important;
+}
+
+.v-data-table > .v-table__wrapper > table > tbody > tr > td {
+  border-bottom: 1px solid rgba(125, 165, 166, 0.08) !important;
+}
+
+.v-tabs {
+  background: transparent !important;
+}
+
+.v-tab {
+  color: #9db4b4 !important;
+}
+
+.v-tab--selected {
+  color: #00ffbe !important;
+}
+
+.v-tabs .v-tab__slider {
+  background: #00ffbe !important;
+  box-shadow: 0 0 8px rgba(0, 255, 190, 0.5);
+}
+
+.v-pagination .v-btn {
+  background: transparent !important;
+}
+
+.v-pagination .v-btn--active {
+  background: rgba(0, 255, 190, 0.16) !important;
+  color: #00ffbe !important;
+}
+
+.v-expansion-panel {
+  background: rgba(10, 23, 29, 0.9) !important;
+  color: #d6e6e5 !important;
+  border: 1px solid rgba(125, 165, 166, 0.12) !important;
+}
+
+.v-expansion-panel-title {
+  color: #d6e6e5 !important;
+}
+
+.v-expansion-panel-title--active {
+  color: #00ffbe !important;
+}
+
+/* =========================================================================
+   Markdown report editor toolbar (.mde-toolbar) - user-confirmed contrast
+   bug: this toolbar is a Vuetify v-toolbar but SCOPED with its own internal
+   "v-theme--light" class independent of the app's global theme toggle, so
+   it needs an explicit, high-specificity fix rather than relying on the
+   generic .v-toolbar/.v-btn rules above to reach it reliably. Also forces
+   opacity:1 and sets both \`color\` and \`fill\` since Vuetify's text-variant
+   buttons apply a dimming opacity by default that reads fine on a light
+   background but becomes near-invisible on a dark one, and SVG icons use
+   fill="currentColor" which needs the fill property, not just color, to be
+   forced in case any icon has a stray explicit fill.
+   ========================================================================= */
+.mde-toolbar {
+  background: #0a141a !important;
+  border-bottom: 1px solid rgba(0, 255, 190, 0.18) !important;
+}
+
+.mde-toolbar .v-btn,
+.mde-toolbar .v-icon,
+.mde-toolbar .v-icon svg {
+  color: #d6e6e5 !important;
+  fill: currentColor !important;
+  opacity: 1 !important;
+}
+
+.mde-toolbar .v-btn:hover,
+.mde-toolbar .v-btn:hover .v-icon {
+  color: #00ffbe !important;
+}
+
+/* Active/selected toggle state (e.g. the currently-selected Write/Split/
+   Preview tab) uses the flat variant with a bright fill - needs dark text
+   on top of it, not the light text used elsewhere in this toolbar. */
+.mde-toolbar .v-btn--variant-flat,
+.mde-toolbar .v-btn--variant-flat .v-icon,
+.mde-toolbar .v-btn--variant-flat .v-icon svg {
+  background: #00e6ac !important;
+  color: #03100e !important;
+  fill: #03100e !important;
+  opacity: 1 !important;
+}
+
+.mde-toolbar .v-divider {
+  border-color: rgba(0, 255, 190, 0.2) !important;
+  opacity: 1 !important;
+}
+
+/* The editor's actual text content area (CodeMirror-based, not Vuetify) */
+.mde .cm-editor,
+.mde .cm-content {
+  background: #050a0e !important;
+  color: #d6e6e5 !important;
+}
+
+.mde .cm-gutters {
+  background: #0a141a !important;
+  color: #557070 !important;
+  border-right: 1px solid rgba(0, 255, 190, 0.1) !important;
+}
+
+.mde .cm-activeLine {
+  background: rgba(0, 255, 190, 0.04) !important;
+}
+
+.mde .cm-selectionBackground {
+  background: rgba(0, 255, 190, 0.18) !important;
+}
+`;
+
+document.getElementById('btn-cyberpunk-preview').addEventListener('click', () => {
+  applyToParent(PARENT_PRESET_STYLE_ID, CYBERPUNK_PRESET_CSS);
+  setMsg('Previewing Cyberpunk Neon preset in this browser only. Not saved yet.', false);
+});
+
+document.getElementById('btn-cyberpunk-keep').addEventListener('click', async () => {
+  if (!confirm('Apply the Cyberpunk Neon preset for everyone (saves as this plugin\'s Custom CSS)?')) return;
+  setMsg('Saving Cyberpunk Neon preset...', false);
+  try {
+    await api('config/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ css: CYBERPUNK_PRESET_CSS, enabled: true }),
+    });
+    document.getElementById('css-editor').value = CYBERPUNK_PRESET_CSS;
+    document.getElementById('css-enabled').checked = true;
+    applyToParent(PARENT_PRESET_STYLE_ID, '');
+    setMsg('Cyberpunk Neon preset saved and enabled app-wide. Reload any open tab to see it.', false);
+  } catch (e) {
+    setMsg(`Preset save failed: ${e.message}`, true);
+  }
+});
+
+loadCurrent();
+</script>
+</body>
+</html>
