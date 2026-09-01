@@ -61,6 +61,11 @@ if [ -f app.env ]; then
 else
   log "Generating app.env with fresh secrets..."
   cp app.env.example app.env
+  # app.env.example doesn't end with a trailing newline - appending directly onto it
+  # would glue the first appended line onto the end of the last existing (commented)
+  # line, silently corrupting it (e.g. ALLOWED_HOSTS getting merged into a comment and
+  # never actually taking effect). Guarantee a clean line boundary first.
+  printf '\n' >> app.env
 
   SECRET_KEY="$(openssl rand -base64 64 | tr -d '\n=')"
   sed -i -e "s#.*SECRET_KEY=.*#SECRET_KEY=\"${SECRET_KEY}\"#" app.env
@@ -71,7 +76,7 @@ else
   sed -i -e "s#.*DEFAULT_ENCRYPTION_KEY_ID=.*#DEFAULT_ENCRYPTION_KEY_ID=\"${KEY_ID}\"#" app.env
 
   # ALLOWED_HOSTS: this host's own reachable addresses, not any specific prior box's.
-  HOST_IPS="$(hostname -I 2>/dev/null | tr ' ' ',' | sed 's/,$//' || true)"
+  HOST_IPS="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//' || true)"
   ALLOWED_HOSTS_VALUE="localhost,127.0.0.1${HOST_IPS:+,$HOST_IPS}"
   if grep -q '^ALLOWED_HOSTS=' app.env; then
     sed -i -e "s#.*ALLOWED_HOSTS=.*#ALLOWED_HOSTS=\"${ALLOWED_HOSTS_VALUE}\"#" app.env
