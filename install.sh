@@ -127,7 +127,13 @@ for plugin in backupmanager customcss; do
   rm -rf "${PLUGIN_VOLUME_PATH:?}/plugins/${plugin}"
   cp -r "$REPO_DIR/plugins/$plugin" "$PLUGIN_VOLUME_PATH/plugins/$plugin"
 done
-chown -R 1000:1000 "$PLUGIN_VOLUME_PATH/plugins"
+# Chown the WHOLE volume root (not just plugins/), not just its plugins/ subdir. The app
+# container runs as uid 1000, but a freshly created Docker volume mounts as root:root by
+# default - if only plugins/ gets fixed, the app can't create new top-level directories under
+# /data later (e.g. uploadedassets/, created lazily on first file upload or restore), which
+# fails with a silent-looking "Permission denied" deep in an unrelated operation (observed via
+# both file uploads and backup restores failing this way).
+chown -R 1000:1000 "$PLUGIN_VOLUME_PATH"
 
 # 6. Bring the stack up -------------------------------------------------------
 log "Starting containers (this pulls images on first run, can take a few minutes)..."

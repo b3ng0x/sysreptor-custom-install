@@ -169,10 +169,16 @@ def restore_backup(enc_path: Path, key_hex: str, skip_database=False, skip_files
         with tarfile.open(outer_tar, 'r') as tf:
             tf.extractall(path=tmpdir, filter='data')
 
-        if not skip_database:
-            _restore_database(tmpdir / 'db.dump')
+        # Files first, then the database - the database replay is the true point of no return
+        # (it can't be trivially rolled back mid-request), while file extraction failing (e.g. a
+        # permissions issue) is comparatively safe to fail on. Restoring DB before files meant a
+        # file-extraction failure left the system with an already-swapped-in old database (with
+        # its own old encryption keys, session state, etc.) but the previous files/config still
+        # in place - a broken, inconsistent half-restore that's hard to recover from.
         if not skip_files:
             _untar_files(tmpdir / 'files.tar')
+        if not skip_database:
+            _restore_database(tmpdir / 'db.dump')
 
 
 def list_local_backups():
