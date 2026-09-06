@@ -22,6 +22,7 @@ class CustomCssPluginConfig(PluginConfig):
         StringField(
             id='CUSTOM_CSS',
             default='',
+            required=False,
             help_text='Raw CSS injected into every page of the app when CUSTOM_CSS_ENABLED is true. '
                       'Edit via the "Custom CSS" plugin page in the main menu rather than here directly - '
                       'it has a live preview and validates the value before saving.'),

@@ -22,9 +22,18 @@ class BackupManagerConfig(PluginConfig):
     plugin_id = 'f413e156-1b86-4b57-a959-427413861cab'
 
     configuration_definition = FieldDefinition(fields=[
+        # NOTE: StringField defaults to required=True. Every field below is legitimately meant
+        # to be left blank (that's how each destination gets "disabled" - see get_frontend_settings
+        # and destinations.py, which all treat '' as "not configured", not an error). Without an
+        # explicit required=False, SysReptor's shared Settings page form treats these as required
+        # across the WHOLE configuration form, refusing to save ANY setting (not just ours) unless
+        # every single one of these is filled in - e.g. trying to save only a Discord webhook URL
+        # was blocked until GitHub/Google Drive fields were also filled in, even though they're
+        # unrelated and meant to stay empty.
         StringField(
             id='BACKUP_ENCRYPTION_KEY',
             default='',
+            required=False,
             help_text='Hex-encoded 256-bit AES key used to encrypt backups. Auto-generated on first run if empty. '
                        'KEEP THIS SAFE - it is required to restore any backup.'),
         BooleanField(
@@ -34,28 +43,34 @@ class BackupManagerConfig(PluginConfig):
         StringField(
             id='BACKUP_DISCORD_WEBHOOK_URL',
             default='',
+            required=False,
             help_text='Discord webhook URL to post backup notifications/uploads to. Leave empty to disable. '
                        'Note: Discord webhooks reject files over 25MB (or higher with server boosts); '
                        'large backups will only send a notification, not the file itself.'),
         StringField(
             id='BACKUP_GITHUB_TOKEN',
             default='',
+            required=False,
             help_text='GitHub personal access token with repo (contents:write) permission. Leave empty to disable.'),
         StringField(
             id='BACKUP_GITHUB_REPO',
             default='',
+            required=False,
             help_text='GitHub repo in "owner/repo" format to push backups to. Leave empty to disable.'),
         StringField(
             id='BACKUP_GITHUB_BRANCH',
             default='main',
+            required=False,
             help_text='Branch to commit backups to.'),
         StringField(
             id='BACKUP_GDRIVE_SERVICE_ACCOUNT_JSON',
             default='',
+            required=False,
             help_text='Full contents of a Google service account JSON key with Drive API access. Leave empty to disable.'),
         StringField(
             id='BACKUP_GDRIVE_FOLDER_ID',
             default='',
+            required=False,
             help_text='Google Drive folder ID to upload backups into (the service account must have access to it).'),
     ])
 

@@ -95,8 +95,28 @@ function setMsg(text, isError) {
   el.className = isError ? 'bad' : 'ok';
 }
 
+// Reads a cookie by name from document.cookie (used for the CSRF token below).
+function getCookie(name) {
+  const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function csrfHeaders(extra) {
+  const csrftoken = getCookie('csrftoken');
+  return csrftoken ? Object.assign({ 'X-CSRFToken': csrftoken }, extra) : Object.assign({}, extra);
+}
+
 async function api(path, opts) {
-  const resp = await fetch(`${API}/${path}`, Object.assign({ credentials: 'same-origin' }, opts));
+  opts = Object.assign({ credentials: 'same-origin' }, opts);
+  const method = (opts.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    // Django's SessionAuthentication enforces CSRF on unsafe methods for cookie-based sessions
+    // (the browser's real login flow) - this was missing entirely, causing every save/reset
+    // action to fail with "CSRF Failed: CSRF token missing." for real users, even though our
+    // own testing with Bearer tokens never hit it (token auth bypasses CSRF).
+    opts.headers = csrfHeaders(opts.headers);
+  }
+  const resp = await fetch(`${API}/${path}`, opts);
   let data = null;
   try { data = await resp.json(); } catch (e) {}
   if (!resp.ok) throw new Error((data && data.detail) || `HTTP ${resp.status}`);
@@ -186,7 +206,7 @@ document.getElementById('btn-preset-keep').addEventListener('click', async () =>
     const resp = await fetch(CORE_CONFIG_API, {
       method: 'PATCH',
       credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
+      headers: csrfHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ PLUGIN_CUSTOMIZETHEME_CONFIG: JSON.stringify(MATRIX_PRESET) }),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -905,6 +925,110 @@ scrollbar-color: #263940 #050a0e;
 
 .mde .cm-selectionBackground {
   background: rgba(0, 255, 190, 0.18) !important;
+}
+
+/* =========================================================================
+   Rendered Markdown PREVIEW pane (Notes / report sections / findings) -
+   user-confirmed contrast bug, distinct from the .mde-toolbar/.cm-editor fix
+   above (that's the EDITING pane). Confirmed via DOM inspection: the preview
+   renders inside a separate same-origin \`srcdoc\` <iframe class="preview-iframe">
+   - a fully isolated document with zero stylesheet of its own, so a <style>
+   tag on the parent window can never reach it no matter the selector.
+   plugin.js injects this same CSS string directly into that iframe's own
+   document (on load, re-applied every time the live preview re-renders and
+   wipes a fresh srcdoc in). Targets plain rendered-HTML tags, not Vuetify
+   classes, since none of those exist inside the iframe's content.
+   ========================================================================= */
+#preview-content,
+#preview-content body,
+html:has(#preview-content),
+body:has(#preview-content) {
+  background: #050a0e !important;
+  color: #d6e6e5 !important;
+}
+
+#preview-content {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding: 12px 16px;
+}
+
+#preview-content h1,
+#preview-content h2,
+#preview-content h3,
+#preview-content h4,
+#preview-content h5,
+#preview-content h6 {
+  color: #00ffbe !important;
+  font-weight: 650;
+  border-bottom: 1px solid rgba(0, 255, 190, 0.15);
+  padding-bottom: 4px;
+}
+
+#preview-content p,
+#preview-content li,
+#preview-content td,
+#preview-content th {
+  color: #d6e6e5 !important;
+}
+
+#preview-content a {
+  color: #00ffbe !important;
+  text-decoration-color: rgba(0, 255, 190, 0.35);
+}
+
+#preview-content code {
+  background: rgba(0, 255, 190, 0.08) !important;
+  color: #00ffbe !important;
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+#preview-content pre {
+  background: #0a141a !important;
+  color: #d6e6e5 !important;
+  border: 1px solid rgba(0, 255, 190, 0.15);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+#preview-content pre code {
+  background: transparent !important;
+  padding: 0;
+}
+
+#preview-content blockquote {
+  border-left: 3px solid rgba(0, 255, 190, 0.4);
+  color: #9db4b4 !important;
+  margin-left: 0;
+  padding-left: 12px;
+}
+
+#preview-content table {
+  border-collapse: collapse;
+}
+
+#preview-content th {
+  background: #0a141a !important;
+  border-bottom: 1px solid rgba(0, 255, 190, 0.25) !important;
+}
+
+#preview-content td,
+#preview-content th {
+  border: 1px solid rgba(125, 165, 166, 0.15) !important;
+  padding: 4px 8px;
+}
+
+#preview-content hr {
+  border-color: rgba(0, 255, 190, 0.2) !important;
+}
+
+#preview-content strong {
+  color: #e5f2f0 !important;
+}
+
+#preview-content img {
+  max-width: 100%;
+  border-radius: 4px;
 }
 `;
 
