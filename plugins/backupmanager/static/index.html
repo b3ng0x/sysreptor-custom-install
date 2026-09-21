@@ -32,6 +32,9 @@
   .notif-bar.notif-success { background: #dcfce7; color: #166534; border-color: #86efac; }
   .notif-bar.notif-error { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
   .notif-bar.notif-info { background: #dbeafe; color: #1e40af; border-color: #93c5fd; }
+  .notif-bar.notif-warning { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+  .advisory { background: #fffbeb; border: 1px solid #fde68a; color: #78350f; border-radius: 6px; padding: 12px 14px; font-size: 13px; line-height: 1.5; margin: 10px 0; }
+  .advisory strong { display: block; margin-bottom: 4px; }
   .notif-bar .notif-close { cursor: pointer; font-weight: 700; padding: 0 4px; opacity: 0.6; }
   .notif-bar .notif-close:hover { opacity: 1; }
   .pagination { display: flex; align-items: center; gap: 10px; margin: 10px 0; font-size: 13px; }
@@ -76,6 +79,18 @@
   <input type="text" id="restore-key" placeholder="AES key (hex) - leave blank to use server's current key">
   <button class="danger" id="btn-restore-upload">Restore uploaded file</button>
 </p>
+
+<h2>Encryption recovery key</h2>
+<div class="advisory">
+  <strong>Backups alone cannot always be restored.</strong>
+  SysReptor encrypts some database columns (passwords, notebook text, finding data, comments)
+  with a key that lives in this server's <code>app.env</code>, not in the database. Backups here
+  only contain the database and files - restoring one onto a <em>different or rebuilt</em>
+  instance produces a database that instance cannot read unless its own encryption key ring
+  already has the key the data was sealed with. Download this file now and store it somewhere
+  separate from your backups (e.g. a password manager). Re-download it whenever the key rotates.
+</div>
+<p><button id="btn-recovery-key">Download recovery key</button></p>
 
 <script>
 const PLUGIN_ID = 'f413e156-1b86-4b57-a959-427413861cab';
@@ -270,16 +285,53 @@ window.downloadLocal = async function(filename) {
   }
 };
 
+window.downloadRecoveryKey = async function() {
+  notify('Downloading recovery key...', 'info', 0);
+  try {
+    const resp = await fetch(`${API}/runs/recovery-key/`, { credentials: 'same-origin' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'sysreptor-recovery-key.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    notify('✔ Recovery key downloaded. Store it somewhere separate from your backups.', 'success', 8000);
+  } catch (e) {
+    notify(`✘ Recovery key download failed: ${e.message}`, 'error', 0);
+  }
+};
+
+// A restore always replaces the database (this UI never exposes skip_database), which also
+// replaces the user/session tables - so the admin driving this restore is unavoidably logged out
+// by the end of it, regardless of whether the restore itself succeeded. Reloading shortly after
+// shows the result (login screen, or a fresh session on the restored data) instead of leaving the
+// page sitting on stale, now-unauthenticated state that further button clicks would just 401 on.
+function handleRestoreResult(result, label) {
+  if (result && result.warning) {
+    notify(`⚠ Restoration completed for "${label}", but: ${result.warning}`, 'warning', 0);
+  } else {
+    notify(`✔ Restoration succeeded: "${label}" has been restored. You will be logged out shortly since the user database was replaced too.`, 'success', 0);
+  }
+  setTimeout(() => location.reload(), 6000);
+}
+
 window.restoreLocal = async function(filename) {
   if (!confirm(`This will OVERWRITE the current database and files with the contents of "${filename}". Continue?`)) return;
   notify(`Restoring ${filename}...`, 'info', 0);
   try {
-    await api('runs/restore-local/', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ filename }) });
-    notify(`✔ Restoration succeeded: "${filename}" has been restored.`, 'success', 8000);
+    const result = await api('runs/restore-local/', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ filename }) });
+    handleRestoreResult(result, filename);
   } catch (e) {
+    // A failed restore (bad key, corrupt archive) is caught before the database is ever touched
+    // (see backup_engine.restore_backup's pre_db_restore_hook), so the session is still valid
+    // here - refresh in place rather than reloading, unlike the success/warning path above.
     notify(`✘ Restoration failed: ${e.message}`, 'error', 0);
+    await refreshAll();
   }
-  await refreshAll();
 };
 
 document.getElementById('btn-trigger').addEventListener('click', async () => {
@@ -314,13 +366,15 @@ document.getElementById('btn-restore-upload').addEventListener('click', async ()
   if (key) fd.append('key', key);
   notify(`Restoring uploaded file "${fileInput.files[0].name}"...`, 'info', 0);
   try {
-    await api('runs/restore-upload/', { method: 'POST', body: fd });
-    notify(`✔ Restoration succeeded: "${fileInput.files[0].name}" has been restored.`, 'success', 8000);
+    const result = await api('runs/restore-upload/', { method: 'POST', body: fd });
+    handleRestoreResult(result, fileInput.files[0].name);
   } catch (e) {
     notify(`✘ Restoration failed: ${e.message}`, 'error', 0);
+    await refreshAll();
   }
-  await refreshAll();
 });
+
+document.getElementById('btn-recovery-key').addEventListener('click', downloadRecoveryKey);
 
 document.getElementById('btn-history-prev').addEventListener('click', () => goToHistoryPage(-1));
 document.getElementById('btn-history-next').addEventListener('click', () => goToHistoryPage(1));

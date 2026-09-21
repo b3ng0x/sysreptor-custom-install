@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from django.conf import settings
 
 log = logging.getLogger(__name__)
 
@@ -147,7 +148,18 @@ def create_backup(key_hex: str) -> Path:
         with tarfile.open(outer_tar, 'w') as tf:
             tf.add(db_dump, arcname='db.dump')
             tf.add(files_tar, arcname='files.tar')
-            meta = {'created': ts, 'format_version': 1}
+            # encryption_key_id records which SysReptor-level field-encryption key (from
+            # ENCRYPTION_KEYS in app.env, NOT this backup's own BACKUP_ENCRYPTION_KEY) the
+            # database's encrypted columns (passwords, notes, findings, comments...) were sealed
+            # with at backup time. It is just a key *id* (safe to store unencrypted - it names a
+            # key, it isn't one), recorded so restore_backup() can warn immediately if the target
+            # instance's own ENCRYPTION_KEYS doesn't contain it, instead of that surfacing later
+            # as opaque CryptoError 500s on login.
+            meta = {
+                'created': ts,
+                'format_version': 2,
+                'encryption_key_id': settings.DEFAULT_ENCRYPTION_KEY_ID,
+            }
             meta_bytes = json.dumps(meta).encode()
             info = tarfile.TarInfo(name='meta.json')
             info.size = len(meta_bytes)
@@ -159,7 +171,19 @@ def create_backup(key_hex: str) -> Path:
     return final_path
 
 
-def restore_backup(enc_path: Path, key_hex: str, skip_database=False, skip_files=False):
+def restore_backup(enc_path: Path, key_hex: str, skip_database=False, skip_files=False, pre_db_restore_hook=None):
+    """
+    Returns a dict describing the restore, including an encryption-key compatibility check
+    (see meta['encryption_key_id'] in create_backup) so the caller can surface a clear warning
+    immediately instead of the failure only showing up later as CryptoError 500s on login.
+
+    pre_db_restore_hook, if given, is called immediately before the database replace - the true
+    point of no return - and only if the database is actually about to be replaced (never on a
+    files-only restore, and never if decryption/extraction/a bad key failed first). This lets a
+    caller do something disruptive-but-necessary, like invalidating the calling HTTP session,
+    exactly when it's actually warranted rather than pre-emptively for a restore attempt that
+    might still fail validation before touching anything.
+    """
     key = bytes.fromhex(key_hex)
     with tempfile.TemporaryDirectory(dir='/tmp') as tmpdir:
         tmpdir = Path(tmpdir)
@@ -169,6 +193,9 @@ def restore_backup(enc_path: Path, key_hex: str, skip_database=False, skip_files
         with tarfile.open(outer_tar, 'r') as tf:
             tf.extractall(path=tmpdir, filter='data')
 
+        meta_path = tmpdir / 'meta.json'
+        meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+
         # Files first, then the database - the database replay is the true point of no return
         # (it can't be trivially rolled back mid-request), while file extraction failing (e.g. a
         # permissions issue) is comparatively safe to fail on. Restoring DB before files meant a
@@ -177,8 +204,41 @@ def restore_backup(enc_path: Path, key_hex: str, skip_database=False, skip_files
         # in place - a broken, inconsistent half-restore that's hard to recover from.
         if not skip_files:
             _untar_files(tmpdir / 'files.tar')
+
+        result = {'backup_encryption_key_id': meta.get('encryption_key_id'), 'key_available': None}
+
         if not skip_database:
+            if pre_db_restore_hook:
+                pre_db_restore_hook()
             _restore_database(tmpdir / 'db.dump')
+
+            # The DB replace above happens via a raw pg_restore/psql replay, entirely outside
+            # Django's configuration.update() (the only thing that normally clears
+            # sysreptor.utils.configuration's process-local, unbounded functools.cache of DB
+            # config values). Left uncleared, this process keeps serving whatever
+            # BACKUP_ENCRYPTION_KEY (and any other DB-backed setting) was cached before the
+            # restore, even though the row underneath just changed to the restored data's value -
+            # this is exactly what made the very next automatic backup get encrypted with a key
+            # that no longer matched what was actually configured, silently producing an
+            # undecryptable backup. Same fix SysReptor's own Settings-save endpoint applies after
+            # every config change (see api_utils/views.py ConfigurationViewSet.patch) - clear this
+            # process's cache immediately, then reload_server() (SIGHUP to gunicorn) so every
+            # worker process in the container picks up the freshly-restored config too, not just
+            # the one that happened to handle this request.
+            from sysreptor.utils.configuration import configuration, reload_server
+            configuration.clear_cache()
+            reload_server()
+
+            # settings.ENCRYPTION_KEYS is loaded once from the app.env environment variable at
+            # process start and is NOT part of the database, so it's untouched by the restore
+            # above - it still reflects this instance's own keys, which is exactly what we want
+            # to compare the backup's origin key id against.
+            result['key_available'] = (
+                result['backup_encryption_key_id'] is None
+                or result['backup_encryption_key_id'] in settings.ENCRYPTION_KEYS
+            )
+
+        return result
 
 
 def list_local_backups():

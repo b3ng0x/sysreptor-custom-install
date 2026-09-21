@@ -1,6 +1,9 @@
+import base64
+import json
 import logging
 from pathlib import Path
 
+from django.conf import settings
 from django.http import HttpResponse
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
@@ -96,7 +99,7 @@ class BackupRunViewSet(viewsets.ReadOnlyModelViewSet):
         path = (backup_engine.BACKUPS_DIR / filename).resolve()
         if backup_engine.BACKUPS_DIR.resolve() not in path.parents or not path.is_file():
             return Response({'detail': 'invalid filename'}, status=status.HTTP_400_BAD_REQUEST)
-        return self._do_restore(path, request.data)
+        return self._do_restore(path, request)
 
     @action(detail=False, methods=['post'], url_path='restore-upload')
     def restore_upload(self, request):
@@ -108,16 +111,71 @@ class BackupRunViewSet(viewsets.ReadOnlyModelViewSet):
             for chunk in upload.chunks():
                 f.write(chunk)
         try:
-            return self._do_restore(tmp_path, request.data)
+            return self._do_restore(tmp_path, request)
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    def _do_restore(self, path, data):
+    @action(detail=False, methods=['get'], url_path='recovery-key')
+    def recovery_key(self, request):
+        # This is deliberately NEVER included in create_backup()'s archive or uploaded to any
+        # destination (Discord/GitHub/GDrive) - see backup_engine.create_backup's meta.json
+        # comment. Putting the key that decrypts data-at-rest inside the encrypted-at-rest backup
+        # would partly defeat the point of encrypting it. Restoring this backup's database onto a
+        # different (or rebuilt) instance produces a database that instance cannot read unless
+        # its own ENCRYPTION_KEYS already contains the key(s) below - so this file is the other,
+        # separate half of that secret and must be stored somewhere independent of the backups
+        # themselves (e.g. a password manager), not next to them.
+        keys = [
+            {
+                'id': k.id,
+                'key': base64.b64encode(k.key).decode(),
+                'cipher': k.cipher.value if hasattr(k.cipher, 'value') else str(k.cipher),
+                'revoked': k.revoked,
+            }
+            for k in settings.ENCRYPTION_KEYS.values()
+        ]
+        payload = {
+            'ENCRYPTION_KEYS': keys,
+            'DEFAULT_ENCRYPTION_KEY_ID': settings.DEFAULT_ENCRYPTION_KEY_ID,
+            'note': (
+                'This file does NOT decrypt backup archives from this plugin (those use a '
+                'separate BACKUP_ENCRYPTION_KEY, shown on the Backups page). It contains the '
+                'key(s) SysReptor itself uses to read encrypted database columns (user '
+                'passwords, notebook text, finding data, comments). A database backup restored '
+                'onto an instance whose own ENCRYPTION_KEYS does not include the id(s) below '
+                'will restore successfully but be unreadable - logins will fail with '
+                'CryptoError. Store this file separately from your backups, and re-download a '
+                'fresh copy whenever ENCRYPTION_KEYS changes (rotation, fresh install).'
+            ),
+        }
+        data = json.dumps(payload, indent=2).encode()
+        resp = HttpResponse(data, content_type='application/json')
+        resp['Content-Disposition'] = 'attachment; filename="sysreptor-recovery-key.json"'
+        resp['Content-Length'] = str(len(data))
+        return resp
+
+    def _do_restore(self, path, request):
+        data = request.data
         key_hex = data.get('key') or configuration.BACKUP_ENCRYPTION_KEY
         skip_database = str(data.get('skip_database', '')).lower() in ('1', 'true')
         skip_files = str(data.get('skip_files', '')).lower() in ('1', 'true')
         try:
-            backup_engine.restore_backup(path, key_hex, skip_database=skip_database, skip_files=skip_files)
+            # A full database restore replaces the sessions table too, so the row backing *this*
+            # request's session is gone by the time Django's SessionMiddleware tries to save it
+            # at the end of the request - that save is an UPDATE against a now-vanished row,
+            # which Django refuses (SessionInterrupted -> opaque 400), masking the fact the
+            # restore itself already succeeded. request.session.flush() tells Django this
+            # session is intentionally gone, so the middleware issues a fresh INSERT into the
+            # restored DB instead of a doomed UPDATE, letting the response below return normally.
+            # The admin is genuinely logged out either way once the database is actually replaced
+            # (the user table just changed too) - this only changes whether that shows up as a
+            # clean re-login prompt or a misleading 400 that looks like the restore itself
+            # failed. Passed as a hook (not called upfront) so a restore that fails validation
+            # (bad key, corrupt archive) before ever reaching the database doesn't needlessly
+            # log the admin out for nothing.
+            result = backup_engine.restore_backup(
+                path, key_hex, skip_database=skip_database, skip_files=skip_files,
+                pre_db_restore_hook=request.session.flush)
             if not skip_database:
                 # The restored DB snapshot may contain the backup run's own tracking row still
                 # marked "running" (see reap_all_running_after_restore docstring) - clear it so a
@@ -128,4 +186,17 @@ class BackupRunViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as ex:
             log.exception('Restore failed')
             return Response({'detail': f'Restore failed: {ex}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response({'detail': 'restore completed'})
+
+        response_data = {'detail': 'restore completed'}
+        if not skip_database:
+            response_data['encryption_key_check'] = result
+            if result.get('key_available') is False:
+                response_data['warning'] = (
+                    f"This backup's data was encrypted with key id "
+                    f"'{result.get('backup_encryption_key_id')}', which is not present in this "
+                    "instance's ENCRYPTION_KEYS. The restore completed, but logins and any "
+                    "encrypted field (passwords, notes, findings, comments) will fail with "
+                    "CryptoError until that key is added to ENCRYPTION_KEYS in app.env and the "
+                    "app is restarted. See the source instance's downloaded recovery-key file."
+                )
+        return Response(response_data)
