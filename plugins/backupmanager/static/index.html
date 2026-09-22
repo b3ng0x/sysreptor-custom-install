@@ -73,6 +73,26 @@
   <tbody id="local-body"></tbody>
 </table>
 
+<div class="advisory">
+  <strong>Restoring a backup made on a different (or rebuilt) instance?</strong>
+  Its database was encrypted with a key that lives in <em>that</em> instance's <code>app.env</code>,
+  not in the backup itself - restoring here can still leave logins and encrypted fields (passwords,
+  notes, findings, comments) failing with <code>CryptoError</code> even though the restore itself
+  succeeded. If you have that source instance's <strong>recovery key</strong> file (see "Download
+  recovery key" below), paste it here <strong>before you click Restore</strong> and it's applied in
+  the same action, automatically, no manual <code>app.env</code> edit needed.
+  <br><br>
+  <strong>Important timing note:</strong> a database restore replaces the user table too, so
+  <em>this</em> admin session ends the moment the restore runs - the "Apply recovery key only"
+  button below only works <em>after</em> a restore if you can still reach this page some other way
+  (a different login that still works, or an API token). If restoring will affect the account
+  you're using to log in, paste the key into the field above first, not after.
+</div>
+<p>
+  <textarea id="recovery-key-input" rows="4" style="width: 100%; max-width: 640px; font-family: monospace; font-size: 12px;" placeholder='Paste the contents of a downloaded sysreptor-recovery-key.json here (optional) - e.g. {"ENCRYPTION_KEYS": [...], ...}'></textarea>
+</p>
+<p><button id="btn-apply-recovery-key">Apply recovery key only (no restore)</button></p>
+
 <h2>Restore from uploaded file</h2>
 <p>
   <input type="file" id="restore-file">
@@ -305,16 +325,39 @@ window.downloadRecoveryKey = async function() {
   }
 };
 
+// Shared by both restore paths (local and uploaded-file) - the pasted recovery-key export, if
+// any, is sent as-is (raw JSON text) and parsed server-side.
+function getRecoveryKeyInput() {
+  return document.getElementById('recovery-key-input').value.trim();
+}
+
+window.applyRecoveryKeyOnly = async function() {
+  const raw = getRecoveryKeyInput();
+  if (!raw) { notify('Paste a recovery key first.', 'error', 5000); return; }
+  notify('Applying recovery key...', 'info', 0);
+  try {
+    const result = await api('runs/apply-recovery-key/', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ recovery_key: raw }),
+    });
+    notify(`✔ Recovery key applied (${result.applied_key_ids.join(', ')}). Encrypted data sealed with ${result.applied_key_ids.length === 1 ? 'that key' : 'those keys'} should be readable now - try logging in again if you were previously blocked.`, 'success', 0);
+  } catch (e) {
+    notify(`✘ Applying recovery key failed: ${e.message}`, 'error', 0);
+  }
+};
+
 // A restore always replaces the database (this UI never exposes skip_database), which also
 // replaces the user/session tables - so the admin driving this restore is unavoidably logged out
 // by the end of it, regardless of whether the restore itself succeeded. Reloading shortly after
 // shows the result (login screen, or a fresh session on the restored data) instead of leaving the
 // page sitting on stale, now-unauthenticated state that further button clicks would just 401 on.
 function handleRestoreResult(result, label) {
+  const appliedNote = result && result.recovery_key_applied
+    ? ` Recovery key applied (${result.recovery_key_applied.join(', ')}).`
+    : '';
   if (result && result.warning) {
-    notify(`⚠ Restoration completed for "${label}", but: ${result.warning}`, 'warning', 0);
+    notify(`⚠ Restoration completed for "${label}", but: ${result.warning}${appliedNote}`, 'warning', 0);
   } else {
-    notify(`✔ Restoration succeeded: "${label}" has been restored. You will be logged out shortly since the user database was replaced too.`, 'success', 0);
+    notify(`✔ Restoration succeeded: "${label}" has been restored.${appliedNote} You will be logged out shortly since the user database was replaced too.`, 'success', 0);
   }
   setTimeout(() => location.reload(), 6000);
 }
@@ -323,7 +366,8 @@ window.restoreLocal = async function(filename) {
   if (!confirm(`This will OVERWRITE the current database and files with the contents of "${filename}". Continue?`)) return;
   notify(`Restoring ${filename}...`, 'info', 0);
   try {
-    const result = await api('runs/restore-local/', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ filename }) });
+    const recovery_key = getRecoveryKeyInput() || undefined;
+    const result = await api('runs/restore-local/', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ filename, recovery_key }) });
     handleRestoreResult(result, filename);
   } catch (e) {
     // A failed restore (bad key, corrupt archive) is caught before the database is ever touched
@@ -364,6 +408,8 @@ document.getElementById('btn-restore-upload').addEventListener('click', async ()
   const fd = new FormData();
   fd.append('file', fileInput.files[0]);
   if (key) fd.append('key', key);
+  const recoveryKey = getRecoveryKeyInput();
+  if (recoveryKey) fd.append('recovery_key', recoveryKey);
   notify(`Restoring uploaded file "${fileInput.files[0].name}"...`, 'info', 0);
   try {
     const result = await api('runs/restore-upload/', { method: 'POST', body: fd });
@@ -375,6 +421,7 @@ document.getElementById('btn-restore-upload').addEventListener('click', async ()
 });
 
 document.getElementById('btn-recovery-key').addEventListener('click', downloadRecoveryKey);
+document.getElementById('btn-apply-recovery-key').addEventListener('click', applyRecoveryKeyOnly);
 
 document.getElementById('btn-history-prev').addEventListener('click', () => goToHistoryPage(-1));
 document.getElementById('btn-history-next').addEventListener('click', () => goToHistoryPage(1));

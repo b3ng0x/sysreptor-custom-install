@@ -8,7 +8,7 @@ from django.http import HttpResponse
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from sysreptor.utils.configuration import configuration
+from sysreptor.utils.configuration import configuration, reload_server
 
 from . import backup_engine, tasks
 from .models import BackupRun
@@ -154,11 +154,55 @@ class BackupRunViewSet(viewsets.ReadOnlyModelViewSet):
         resp['Content-Length'] = str(len(data))
         return resp
 
+    @action(detail=False, methods=['post'], url_path='apply-recovery-key')
+    def apply_recovery_key(self, request):
+        """
+        Lets an admin paste a recovery-key export (this plugin's own "Download recovery key"
+        format) directly into the restore UI and have it take effect immediately - no manual
+        app.env edit, no container recreation. See backup_engine.apply_recovery_keys for how and
+        why this works (and the trade-off it accepts) and CONTEXT.md for the incident that
+        motivated it. Usable standalone (e.g. to fix a restore done in an earlier session without
+        re-uploading the backup file again), and also wired into _do_restore below via the
+        `recovery_key` field so it can be supplied in the same request as the restore itself.
+        """
+        try:
+            payload = request.data.get('recovery_key') if 'recovery_key' in request.data else request.data
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            applied_ids = backup_engine.apply_recovery_keys(payload)
+        except backup_engine.BackupError as ex:
+            return Response({'detail': str(ex)}, status=status.HTTP_400_BAD_REQUEST)
+        except (json.JSONDecodeError, TypeError) as ex:
+            return Response({'detail': f'Recovery key: invalid JSON ({ex})'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Propagate to every worker process in this container, not just the one handling this
+        # request - same reasoning as in restore_backup's own post-database-restore cache clear.
+        configuration.clear_cache()
+        reload_server()
+
+        return Response({'detail': 'recovery key applied', 'applied_key_ids': applied_ids})
+
     def _do_restore(self, path, request):
         data = request.data
         key_hex = data.get('key') or configuration.BACKUP_ENCRYPTION_KEY
         skip_database = str(data.get('skip_database', '')).lower() in ('1', 'true')
         skip_files = str(data.get('skip_files', '')).lower() in ('1', 'true')
+        recovery_key_applied = None
+        raw_recovery_key = data.get('recovery_key')
+        if raw_recovery_key:
+            try:
+                payload = json.loads(raw_recovery_key) if isinstance(raw_recovery_key, str) else raw_recovery_key
+                recovery_key_applied = backup_engine.apply_recovery_keys(payload)
+                # restore_backup() below only reload_server()s when it actually replaces the
+                # database (not on a files-only restore) - do it unconditionally here so a
+                # recovery key supplied alongside a files-only restore still reaches every worker
+                # process, not just this one.
+                configuration.clear_cache()
+                reload_server()
+            except backup_engine.BackupError as ex:
+                return Response({'detail': str(ex)}, status=status.HTTP_400_BAD_REQUEST)
+            except (json.JSONDecodeError, TypeError) as ex:
+                return Response({'detail': f'Recovery key: invalid JSON ({ex})'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             # A full database restore replaces the sessions table too, so the row backing *this*
             # request's session is gone by the time Django's SessionMiddleware tries to save it
@@ -188,6 +232,8 @@ class BackupRunViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'detail': f'Restore failed: {ex}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         response_data = {'detail': 'restore completed'}
+        if recovery_key_applied is not None:
+            response_data['recovery_key_applied'] = recovery_key_applied
         if not skip_database:
             response_data['encryption_key_check'] = result
             if result.get('key_available') is False:
@@ -196,7 +242,9 @@ class BackupRunViewSet(viewsets.ReadOnlyModelViewSet):
                     f"'{result.get('backup_encryption_key_id')}', which is not present in this "
                     "instance's ENCRYPTION_KEYS. The restore completed, but logins and any "
                     "encrypted field (passwords, notes, findings, comments) will fail with "
-                    "CryptoError until that key is added to ENCRYPTION_KEYS in app.env and the "
-                    "app is restarted. See the source instance's downloaded recovery-key file."
+                    "CryptoError until that key is recovered. Paste the source instance's "
+                    "downloaded recovery-key file into the \"Recovery key\" field and restore "
+                    "again (or use \"Apply recovery key\" on its own, without re-uploading the "
+                    "backup) - no manual app.env edit needed."
                 )
         return Response(response_data)

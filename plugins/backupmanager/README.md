@@ -72,6 +72,22 @@ Open the "Backups" item in the main menu (added by this plugin). From there:
 - **Restore from uploaded file** - upload an `.tar.enc` backup (e.g. one pulled back down from
   GitHub/Drive) and restore from it, optionally with a different AES key than the server's current
   one (useful for restoring a backup taken before a key rotation).
+- **Recovery key field** - separate from the backup's own AES key above. SysReptor encrypts some
+  database columns (passwords, notebook text, finding data, comments) with `ENCRYPTION_KEYS`, an
+  environment variable in `app.env` - not part of the backup archive at all (see "Download recovery
+  key" on the same page). Restoring a backup made on a *different or rebuilt* instance replaces the
+  database successfully but leaves that data unreadable (`CryptoError` on login) unless this
+  instance's key ring already has the key it was sealed with. Paste that source instance's
+  recovery-key export into the "Recovery key" field **before clicking Restore** and it's applied
+  automatically in the same action - no manual `app.env` edit, no container recreation. Under the
+  hood: the app can't reach `app.env` on the host at all, so a pasted key is instead persisted to
+  `/data/backupmanager_recovered_encryption_keys.json` (survives plugin redeploys and container
+  restarts) and merged into `settings.ENCRYPTION_KEYS` on every app startup. This is a deliberate,
+  narrow exception to keeping the two keys apart - only for a key a human explicitly pastes in
+  during recovery, never populated automatically by any backup/restore. The standalone "Apply
+  recovery key only" button applies a key without restoring anything, but **only helps if you can
+  still reach this page** - a restore that touches your own account logs you out before you'd get
+  the chance to use it, so paste proactively into the field above when that's a risk, not after.
 
 All of this is also available directly via the REST API at `/api/plugins/<plugin_id>/api/runs/...`
 if you want to script it (e.g. `curl` from an external cron as a belt-and-suspenders check that

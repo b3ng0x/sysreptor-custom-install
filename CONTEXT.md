@@ -164,6 +164,44 @@ re-introducing the same bug from a different angle.
     markdown editor toolbar and preview text unreadable in light mode (and partially in dark
     mode) - a straightforward color-contrast bug in the preset CSS, fixed and re-verified with
     Selenium screenshots in both themes.
+12. **Follow-up to #6: closing the loop so recovering a key doesn't require a manual `app.env`
+    edit.** #6 gave the admin a clear warning and a recovery-key export, but actually *using* that
+    export still meant SSHing into the host, hand-editing `app.env`, and recreating the container -
+    exactly the kind of step a GUI restore flow shouldn't require. The blocker: `ENCRYPTION_KEYS`
+    is a plain OS environment variable, fixed for the life of the container - the app has no
+    filesystem access to `app.env` on the host at all, and even a graceful `reload_server()` just
+    respawns workers with that same fixed environment (confirmed: editing `app.env` and sending
+    SIGHUP does *not* pick up the change; only a full `docker compose up -d` re-reads the
+    `env_file`). The fix uses the one piece of mutable, persistent storage the app *can* reach at
+    runtime: a pasted recovery-key export now gets written to
+    `/data/backupmanager_recovered_encryption_keys.json` (deliberately outside
+    `plugins/backupmanager/`, which `install.sh` wipes and redeploys on every update) and merged
+    into `settings.ENCRYPTION_KEYS` in three places - immediately, in-process, for the request that
+    received it; on every subsequent app startup/reload via `BackupManagerConfig.ready()`; and
+    propagated to every other worker in the container via the same `clear_cache()` +
+    `reload_server()` pattern from #7. Verified end-to-end against a real cross-instance restore
+    (see below) including survival across a genuine container restart, not just a graceful reload.
+    **Known sharp edge, by design, not a bug:** the standalone "Apply recovery key only" button
+    requires an authenticated superuser session - which is exactly what's broken if the restore
+    affected *your own* account. It only helps if you can still reach the page some other way. The
+    field on the restore form itself doesn't have this problem: paste the recovery key there
+    *before* clicking Restore and it's applied in the same request, before the database (and the
+    current session) gets replaced. This is a deliberate, narrow softening of #6's "two-part
+    secret, kept apart" design - a key only ever enters the ring this way if a human explicitly
+    pastes it in during recovery, never automatically from a backup/restore.
+    - **Real-world validation of this whole feature**, done as one exercise: took a genuinely old
+      backup (`format_version: 1`, predating item #6 entirely, so no key id was ever recorded in
+      it), restored it onto a from-scratch second instance (separate containers/volumes/network -
+      `sysreptor-test2-*`), confirmed the exact real failure (`CryptoError: No key with id=
+      9b00d4ba-92a4-4721-8638-16d869efa811 in ENCRYPTION_KEYS` - via the real `/api/v1/auth/login/`
+      endpoint, HTTP 500, not just an ORM-level check), then recovered the actual source key
+      material for that id and confirmed: (a) manually editing `app.env` + `docker compose up -d`
+      fixes it (the old, and still-available, manual path), and (b) pasting the same recovery key
+      into the restore form's new field, in the *same* restore-upload request as the backup file
+      itself, fixes it identically with zero manual host access - a clean `400 Invalid username or
+      password` on a deliberately-wrong-password login attempt (proving decryption now succeeds,
+      only credential-matching correctly fails), surviving both a `reload_server()` and a full
+      container restart.
 
 ## Known limitations (unchanged from README, repeated here for completeness)
 

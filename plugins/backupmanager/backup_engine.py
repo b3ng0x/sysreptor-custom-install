@@ -6,6 +6,7 @@ Professional license check. Rather than depending on internal, license-gated cod
 module does its own DB dump (pg_dump/pg_restore against the same Postgres instance the app uses)
 and its own tar of the app-data volume, combined into one archive and encrypted with AES-256-GCM.
 """
+import base64
 import io
 import json
 import logging
@@ -27,6 +28,88 @@ DATA_DIR = Path('/data')
 PLUGIN_DIR = Path(__file__).resolve().parent
 BACKUPS_DIR = PLUGIN_DIR / 'backups'
 BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Lives directly under DATA_DIR (the /data volume), NOT under plugins/backupmanager - install.sh
+# (and this plugin's own installer step) does `rm -rf plugins/backupmanager` before redeploying
+# plugin code, which would silently destroy this if it lived inside the plugin's own directory.
+# See apply_recovery_keys() and CONTEXT.md's encryption-key incident for why this file exists at
+# all: ENCRYPTION_KEYS is a plain OS environment variable, fixed for the life of the container -
+# the running app has no way to reach app.env on the host to add a key a restore turned out to
+# need, and even a graceful reload just respawns workers with that same fixed environment. This
+# file is the one piece of mutable, persistent storage the app itself *can* reach at runtime, so a
+# recovered key pasted in through the restore UI can actually take effect without a manual
+# app.env edit + full `docker compose up -d`. Deliberate trade-off: this does mean recovered key
+# material can enter the key ring via the app's own persistent volume, not solely via app.env on
+# the host - narrower than the original "two-part secret, kept apart" design, and only for keys a
+# human explicitly pasted in during recovery, never populated automatically by a backup/restore.
+RECOVERED_KEYS_PATH = DATA_DIR / 'backupmanager_recovered_encryption_keys.json'
+
+
+def load_recovered_encryption_keys():
+    """
+    Merges any previously-recovered keys (see apply_recovery_keys) into the live
+    settings.ENCRYPTION_KEYS dict. Called from BackupManagerConfig.ready() on every app startup/
+    worker respawn, so a key recovered in a past session keeps applying after restarts too - not
+    just for the process that received it.
+    """
+    if not RECOVERED_KEYS_PATH.is_file():
+        return
+    try:
+        from sysreptor.utils.crypto.base import EncryptionKey
+        entries = json.loads(RECOVERED_KEYS_PATH.read_text())
+        settings.ENCRYPTION_KEYS.update(EncryptionKey.from_json_list(json.dumps(entries)))
+        log.info(f'BackupManager: merged {len(entries)} recovered encryption key(s) from {RECOVERED_KEYS_PATH}')
+    except Exception:
+        log.exception(f'BackupManager: failed to load recovered encryption keys from {RECOVERED_KEYS_PATH}')
+
+
+def apply_recovery_keys(payload) -> list[str]:
+    """
+    Accepts a recovery-key export (this plugin's own "Download recovery key" format - a dict with
+    an ENCRYPTION_KEYS list - or a bare list in the same shape ENCRYPTION_KEYS itself uses),
+    validates it, merges it into the on-disk recovered-keys store (union by id, existing entries
+    win on conflict - never silently overwrite a key already present) and into the CURRENT
+    process's live settings.ENCRYPTION_KEYS so it's usable immediately, without waiting for a
+    reload. Returns the list of key ids that ended up applied (already-present ones included).
+
+    Deliberately does NOT touch DEFAULT_ENCRYPTION_KEY_ID - a recovered key is for *reading* old
+    data, not for changing which key this instance uses to encrypt anything new.
+    """
+    from sysreptor.utils.crypto.base import EncryptionCipher, EncryptionKey
+
+    entries = payload.get('ENCRYPTION_KEYS') if isinstance(payload, dict) else payload
+    if not isinstance(entries, list) or not entries:
+        raise BackupError('Recovery key: expected a non-empty ENCRYPTION_KEYS list (paste the file from "Download recovery key").')
+
+    existing = {}
+    if RECOVERED_KEYS_PATH.is_file():
+        try:
+            existing = {e['id']: e for e in json.loads(RECOVERED_KEYS_PATH.read_text())}
+        except Exception:
+            existing = {}
+
+    applied_ids = []
+    for entry in entries:
+        try:
+            key_id = entry['id']
+            key_bytes = base64.b64decode(entry['key'])
+            cipher = EncryptionCipher(entry.get('cipher', 'AES-GCM'))
+            if len(key_bytes) not in (16, 24, 32):
+                raise ValueError(f'unexpected key length {len(key_bytes)} bytes for id={key_id}')
+        except Exception as ex:
+            raise BackupError(f'Recovery key: invalid entry ({ex}). Expected the exact format from "Download recovery key".') from ex
+
+        existing.setdefault(key_id, {
+            'id': key_id, 'key': entry['key'], 'cipher': cipher.value, 'revoked': bool(entry.get('revoked', False)),
+        })
+        applied_ids.append(key_id)
+        # Apply to the CURRENT process immediately - settings.ENCRYPTION_KEYS is read live on
+        # every decrypt (see sysreptor.utils.crypto.base.open), so this takes effect right away
+        # for this worker without needing the reload below.
+        settings.ENCRYPTION_KEYS[key_id] = EncryptionKey(id=key_id, key=key_bytes, cipher=cipher, revoked=bool(entry.get('revoked', False)))
+
+    RECOVERED_KEYS_PATH.write_text(json.dumps(list(existing.values()), indent=2))
+    return applied_ids
 
 # Excluded from the files tar: our own plugin code + output dir (redeployed by the installer,
 # not user data; also avoids the tar recursively including previous backup archives).

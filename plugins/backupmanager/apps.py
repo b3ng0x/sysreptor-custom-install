@@ -76,10 +76,17 @@ class BackupManagerConfig(PluginConfig):
 
     def ready(self) -> None:
         log.info('Loading BackupManager plugin...')
-        from . import tasks  # noqa
+        from . import backup_engine, tasks  # noqa
         # Key generation is deferred to first actual use (run_backup) rather than done here -
         # querying/writing the DB during AppConfig.ready() triggers Django's
         # "Accessing the database during app initialization is discouraged" warning.
+
+        # Re-apply any encryption keys recovered via the restore UI's "recovery key" field in a
+        # past session - ready() runs fresh in every worker process (including new ones spawned
+        # by a reload_server() SIGHUP), so this is what makes a previously-recovered key keep
+        # working across restarts/reloads, not just for the one process that originally received
+        # it. Pure filesystem read, no DB access, safe to do here.
+        backup_engine.load_recovered_encryption_keys()
 
     def get_frontend_settings(self, request):
         return {
