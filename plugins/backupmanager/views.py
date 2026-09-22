@@ -1,9 +1,7 @@
-import base64
 import json
 import logging
 from pathlib import Path
 
-from django.conf import settings
 from django.http import HttpResponse
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
@@ -117,35 +115,21 @@ class BackupRunViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='recovery-key')
     def recovery_key(self, request):
-        # This is deliberately NEVER included in create_backup()'s archive or uploaded to any
-        # destination (Discord/GitHub/GDrive) - see backup_engine.create_backup's meta.json
-        # comment. Putting the key that decrypts data-at-rest inside the encrypted-at-rest backup
-        # would partly defeat the point of encrypting it. Restoring this backup's database onto a
-        # different (or rebuilt) instance produces a database that instance cannot read unless
-        # its own ENCRYPTION_KEYS already contains the key(s) below - so this file is the other,
-        # separate half of that secret and must be stored somewhere independent of the backups
-        # themselves (e.g. a password manager), not next to them.
-        keys = [
-            {
-                'id': k.id,
-                'key': base64.b64encode(k.key).decode(),
-                'cipher': k.cipher.value if hasattr(k.cipher, 'value') else str(k.cipher),
-                'revoked': k.revoked,
-            }
-            for k in settings.ENCRYPTION_KEYS.values()
-        ]
-        payload = {
-            'ENCRYPTION_KEYS': keys,
-            'DEFAULT_ENCRYPTION_KEY_ID': settings.DEFAULT_ENCRYPTION_KEY_ID,
+        # Backups created by this plugin now bundle this same payload directly into the archive
+        # (see backup_engine.create_backup's encryption_keys.json comment) - restoring one only
+        # needs the .tar.enc file and BACKUP_ENCRYPTION_KEY, nothing from here. This standalone
+        # export still exists for out-of-band cases that bundling can't cover: pre-provisioning a
+        # replacement instance's ENCRYPTION_KEYS before any restore happens, or recovering a
+        # backup made before this bundling existed (or a corrupted/incomplete archive).
+        payload = backup_engine.build_recovery_key_payload() | {
             'note': (
                 'This file does NOT decrypt backup archives from this plugin (those use a '
                 'separate BACKUP_ENCRYPTION_KEY, shown on the Backups page). It contains the '
                 'key(s) SysReptor itself uses to read encrypted database columns (user '
-                'passwords, notebook text, finding data, comments). A database backup restored '
-                'onto an instance whose own ENCRYPTION_KEYS does not include the id(s) below '
-                'will restore successfully but be unreadable - logins will fail with '
-                'CryptoError. Store this file separately from your backups, and re-download a '
-                'fresh copy whenever ENCRYPTION_KEYS changes (rotation, fresh install).'
+                'passwords, notebook text, finding data, comments). Backups created by this '
+                'plugin now bundle this automatically, so you shouldn\'t normally need this file '
+                'at restore time - it\'s here for pre-provisioning a replacement instance ahead '
+                'of time, or recovering an older backup made before this was bundled in.'
             ),
         }
         data = json.dumps(payload, indent=2).encode()

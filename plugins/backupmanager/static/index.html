@@ -75,21 +75,27 @@
 
 <div class="advisory">
   <strong>Restoring a backup made on a different (or rebuilt) instance?</strong>
-  Its database was encrypted with a key that lives in <em>that</em> instance's <code>app.env</code>,
-  not in the backup itself - restoring here can still leave logins and encrypted fields (passwords,
-  notes, findings, comments) failing with <code>CryptoError</code> even though the restore itself
-  succeeded. If you have that source instance's <strong>recovery key</strong> file (see "Download
-  recovery key" below), paste it here <strong>before you click Restore</strong> and it's applied in
-  the same action, automatically, no manual <code>app.env</code> edit needed.
+  As of this version, backups make themselves restorable anywhere: the encryption key needed to
+  read the database is bundled directly into the archive (protected by the same
+  <code>BACKUP_ENCRYPTION_KEY</code> that already protects everything else in it) and applied
+  automatically during restore. For a backup made this way, restoring only needs
+  <strong>two things: the backup file and its <code>BACKUP_ENCRYPTION_KEY</code></strong> - nothing
+  below this box should normally be needed.
   <br><br>
-  <strong>Important timing note:</strong> a database restore replaces the user table too, so
-  <em>this</em> admin session ends the moment the restore runs - the "Apply recovery key only"
-  button below only works <em>after</em> a restore if you can still reach this page some other way
-  (a different login that still works, or an API token). If restoring will affect the account
-  you're using to log in, paste the key into the field above first, not after.
+  <strong>Security trade-off, by design:</strong> this means <code>BACKUP_ENCRYPTION_KEY</code> alone
+  now unlocks everything in a backup, not just the archive - protect it accordingly (it's shown on
+  this page; anyone who can read it plus grab a copy of a backup file has everything).
+  <br><br>
+  The field and button below are the fallback path - still needed for backups made
+  <em>before</em> this change, or if a backup's bundled key is ever missing/corrupted. Paste a
+  recovery-key export <strong>before you click Restore</strong> to have it applied in the same
+  action, automatically. <strong>Timing note:</strong> a database restore replaces the user table
+  too, so <em>this</em> admin session ends the moment the restore runs - "Apply recovery key only"
+  below only works <em>after</em> a restore if you can still reach this page some other way (a
+  different login that still works, or an API token).
 </div>
 <p>
-  <textarea id="recovery-key-input" rows="4" style="width: 100%; max-width: 640px; font-family: monospace; font-size: 12px;" placeholder='Paste the contents of a downloaded sysreptor-recovery-key.json here (optional) - e.g. {"ENCRYPTION_KEYS": [...], ...}'></textarea>
+  <textarea id="recovery-key-input" rows="4" style="width: 100%; max-width: 640px; font-family: monospace; font-size: 12px;" placeholder='Fallback only - paste a downloaded sysreptor-recovery-key.json here if a backup does not already have its key bundled'></textarea>
 </p>
 <p><button id="btn-apply-recovery-key">Apply recovery key only (no restore)</button></p>
 
@@ -100,15 +106,12 @@
   <button class="danger" id="btn-restore-upload">Restore uploaded file</button>
 </p>
 
-<h2>Encryption recovery key</h2>
+<h2>Encryption recovery key (standalone export)</h2>
 <div class="advisory">
-  <strong>Backups alone cannot always be restored.</strong>
-  SysReptor encrypts some database columns (passwords, notebook text, finding data, comments)
-  with a key that lives in this server's <code>app.env</code>, not in the database. Backups here
-  only contain the database and files - restoring one onto a <em>different or rebuilt</em>
-  instance produces a database that instance cannot read unless its own encryption key ring
-  already has the key the data was sealed with. Download this file now and store it somewhere
-  separate from your backups (e.g. a password manager). Re-download it whenever the key rotates.
+  New backups already bundle this automatically (see above) - you shouldn't normally need to
+  download it separately. Still useful for pre-provisioning a replacement instance's
+  <code>ENCRYPTION_KEYS</code> before any restore happens, or recovering a backup made before
+  bundling existed.
 </div>
 <p><button id="btn-recovery-key">Download recovery key</button></p>
 

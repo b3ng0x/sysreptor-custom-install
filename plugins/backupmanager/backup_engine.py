@@ -63,6 +63,28 @@ def load_recovered_encryption_keys():
         log.exception(f'BackupManager: failed to load recovered encryption keys from {RECOVERED_KEYS_PATH}')
 
 
+def build_recovery_key_payload() -> dict:
+    """
+    This instance's own ENCRYPTION_KEYS, in the exact shape apply_recovery_keys() and
+    EncryptionKey.from_json_list() expect. Shared by the manual "Download recovery key" export
+    (views.recovery_key) and create_backup()'s now-default bundling of this same payload into the
+    archive itself (see the encryption_keys.json comment below) - one source of truth for the
+    format.
+    """
+    return {
+        'ENCRYPTION_KEYS': [
+            {
+                'id': k.id,
+                'key': base64.b64encode(k.key).decode(),
+                'cipher': k.cipher.value if hasattr(k.cipher, 'value') else str(k.cipher),
+                'revoked': k.revoked,
+            }
+            for k in settings.ENCRYPTION_KEYS.values()
+        ],
+        'DEFAULT_ENCRYPTION_KEY_ID': settings.DEFAULT_ENCRYPTION_KEY_ID,
+    }
+
+
 def apply_recovery_keys(payload) -> list[str]:
     """
     Accepts a recovery-key export (this plugin's own "Download recovery key" format - a dict with
@@ -231,16 +253,37 @@ def create_backup(key_hex: str) -> Path:
         with tarfile.open(outer_tar, 'w') as tf:
             tf.add(db_dump, arcname='db.dump')
             tf.add(files_tar, arcname='files.tar')
-            # encryption_key_id records which SysReptor-level field-encryption key (from
-            # ENCRYPTION_KEYS in app.env, NOT this backup's own BACKUP_ENCRYPTION_KEY) the
-            # database's encrypted columns (passwords, notes, findings, comments...) were sealed
-            # with at backup time. It is just a key *id* (safe to store unencrypted - it names a
-            # key, it isn't one), recorded so restore_backup() can warn immediately if the target
-            # instance's own ENCRYPTION_KEYS doesn't contain it, instead of that surfacing later
-            # as opaque CryptoError 500s on login.
+
+            # encryption_keys.json bundles this instance's actual ENCRYPTION_KEYS (the SysReptor-
+            # level field-encryption key(s) from app.env, NOT this backup's own
+            # BACKUP_ENCRYPTION_KEY - same content as the standalone "Download recovery key"
+            # export, see build_recovery_key_payload) directly into the archive, so restoring
+            # this backup on ANY instance - not just one that already happens to share this key -
+            # only ever needs two things: the .tar.enc file and BACKUP_ENCRYPTION_KEY.
+            # restore_backup() applies it automatically before checking decryptability.
+            #
+            # Deliberate, explicit trade-off, by request: this collapses the "two-part secret,
+            # kept apart" design from earlier (backup archive + host app.env, separately) into a
+            # single secret - whoever has BACKUP_ENCRYPTION_KEY and this archive now has
+            # everything needed to read this instance's encrypted data, on any host, forever
+            # (there is no revocation once a key has been embedded in a past backup still sitting
+            # somewhere). That is exactly what was asked for here: restore only needs the archive
+            # + this one key, with no separate app.env-recovery step. If that trade-off ever needs
+            # walking back, the recovery-key UI flow (backup_engine.apply_recovery_keys,
+            # views.apply_recovery_key) still exists independently and still works for backups
+            # that don't carry this file (or for a build that stops embedding it).
+            keys_bytes = json.dumps(build_recovery_key_payload()).encode()
+            info = tarfile.TarInfo(name='encryption_keys.json')
+            info.size = len(keys_bytes)
+            tf.addfile(info, io.BytesIO(keys_bytes))
+
+            # encryption_key_id records which key (by id only, never the key itself) the database
+            # was actually sealed with at backup time - kept as a fast, explicit compatibility
+            # check independent of whether encryption_keys.json above was present/valid, and for
+            # backward-compat parsing of older backups from before either field existed.
             meta = {
                 'created': ts,
-                'format_version': 2,
+                'format_version': 3,
                 'encryption_key_id': settings.DEFAULT_ENCRYPTION_KEY_ID,
             }
             meta_bytes = json.dumps(meta).encode()
@@ -278,6 +321,20 @@ def restore_backup(enc_path: Path, key_hex: str, skip_database=False, skip_files
 
         meta_path = tmpdir / 'meta.json'
         meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+
+        # Auto-apply any encryption keys bundled into the archive itself (see create_backup's
+        # encryption_keys.json comment) BEFORE anything else - so by the time files/database are
+        # restored and the key_available check below runs, a backup made with the current
+        # (post-this-change) format has already made itself fully decryptable on this instance,
+        # with no separate recovery-key paste step required. A manually-pasted recovery_key (via
+        # the caller) still works too and is applied by the caller before this function runs -
+        # this just means it's no longer usually necessary for backups created going forward.
+        keys_path = tmpdir / 'encryption_keys.json'
+        if keys_path.is_file():
+            try:
+                apply_recovery_keys(json.loads(keys_path.read_text()))
+            except BackupError:
+                log.exception('BackupManager: bundled encryption_keys.json in archive was malformed, ignoring it')
 
         # Files first, then the database - the database replay is the true point of no return
         # (it can't be trivially rolled back mid-request), while file extraction failing (e.g. a

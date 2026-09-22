@@ -16,13 +16,32 @@ volume (excluding this plugin's own code/output directory), combined and encrypt
 with AES-256-GCM. Restore is the reverse: decrypt, `pg_restore --clean --if-exists`, and re-extract
 the files tar.
 
+## What you need to restore a backup
+
+**Two things: the `.tar.enc` file, and `BACKUP_ENCRYPTION_KEY`.** That's it - restoring a backup
+made by this plugin onto any instance, anywhere, doesn't require that instance to already share
+anything with the one the backup came from. Every backup bundles a copy of the source instance's
+`ENCRYPTION_KEYS` (the separate key SysReptor itself uses to read encrypted database columns -
+passwords, notebook text, finding data, comments) directly into the archive, protected by the
+same `BACKUP_ENCRYPTION_KEY` that already protects everything else in it, and restore applies it
+automatically.
+
+**The trade-off, explicitly:** this means `BACKUP_ENCRYPTION_KEY` alone is now enough to decrypt
+*everything* in a backup, not just the archive structure - protect it like the master secret it
+now is. This was a deliberate choice, in favor of restore simplicity over defense-in-depth
+between "get the archive" and "get the data-at-rest key" as two separate compromises. If you'd
+rather keep those apart, don't rely on the bundled key - use the standalone recovery-key export
+and paste-at-restore-time flow instead (still present, see below), and treat `BACKUP_ENCRYPTION_KEY`
+as only unlocking the archive, same as before.
+
 ## Setup
 
 Nothing to configure by hand to get local backups working - on first load the plugin
 auto-generates a 256-bit AES encryption key (`BACKUP_ENCRYPTION_KEY`) and stores it via
 SysReptor's configuration system (Settings page, or the `api_utils_dbconfigurationentry` table).
-**Back this key up somewhere safe outside the system itself** - without it, existing backups
-cannot be decrypted or restored.
+**Back this key up somewhere safe outside the system itself** - without it, backups cannot be
+decrypted or restored at all, full stop (this key now guards both the archive and, per above,
+the field-encryption keys bundled inside it).
 
 To enable the plugin, add it to `ENABLED_PLUGINS` in `/opt/sysreptor/deploy/app.env`:
 
@@ -72,19 +91,15 @@ Open the "Backups" item in the main menu (added by this plugin). From there:
 - **Restore from uploaded file** - upload an `.tar.enc` backup (e.g. one pulled back down from
   GitHub/Drive) and restore from it, optionally with a different AES key than the server's current
   one (useful for restoring a backup taken before a key rotation).
-- **Recovery key field** - separate from the backup's own AES key above. SysReptor encrypts some
-  database columns (passwords, notebook text, finding data, comments) with `ENCRYPTION_KEYS`, an
-  environment variable in `app.env` - not part of the backup archive at all (see "Download recovery
-  key" on the same page). Restoring a backup made on a *different or rebuilt* instance replaces the
-  database successfully but leaves that data unreadable (`CryptoError` on login) unless this
-  instance's key ring already has the key it was sealed with. Paste that source instance's
-  recovery-key export into the "Recovery key" field **before clicking Restore** and it's applied
-  automatically in the same action - no manual `app.env` edit, no container recreation. Under the
-  hood: the app can't reach `app.env` on the host at all, so a pasted key is instead persisted to
+- **Recovery key field (fallback only)** - not normally needed, since new backups already bundle
+  their `ENCRYPTION_KEYS` automatically (see above). Still there for backups made *before* this
+  bundling existed, or the rare case a bundled key is missing/corrupted. Paste a recovery-key
+  export (see "Download recovery key" further down the page) into the "Recovery key" field
+  **before clicking Restore** and it's applied automatically in the same action - no manual
+  `app.env` edit, no container recreation. Under the hood: the app can't reach `app.env` on the
+  host at all, so a pasted (or bundled) key is instead persisted to
   `/data/backupmanager_recovered_encryption_keys.json` (survives plugin redeploys and container
-  restarts) and merged into `settings.ENCRYPTION_KEYS` on every app startup. This is a deliberate,
-  narrow exception to keeping the two keys apart - only for a key a human explicitly pastes in
-  during recovery, never populated automatically by any backup/restore. The standalone "Apply
+  restarts) and merged into `settings.ENCRYPTION_KEYS` on every app startup. The standalone "Apply
   recovery key only" button applies a key without restoring anything, but **only helps if you can
   still reach this page** - a restore that touches your own account logs you out before you'd get
   the chance to use it, so paste proactively into the field above when that's a risk, not after.

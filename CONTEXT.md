@@ -202,6 +202,31 @@ re-introducing the same bug from a different angle.
       password` on a deliberately-wrong-password login attempt (proving decryption now succeeds,
       only credential-matching correctly fails), surviving both a `reload_server()` and a full
       container restart.
+13. **Explicit follow-up request that reverses part of #6's design: bundle `ENCRYPTION_KEYS`
+    directly into every backup, by default, so restoring anywhere only needs the archive +
+    `BACKUP_ENCRYPTION_KEY` - no recovery-key paste step at all.** This was asked for directly,
+    after #6 and #12 were already built and understood - not a bug fix, a deliberate reversal of
+    the "two-part secret, kept apart" model. `create_backup()` now writes an `encryption_keys.json`
+    (same shape/content as the standalone "Download recovery key" export - both now share one
+    `build_recovery_key_payload()` source of truth) into the same tar as `db.dump`/`files.tar`,
+    protected by nothing extra - just the same `BACKUP_ENCRYPTION_KEY` that already protects
+    everything else in the archive. `restore_backup()` auto-applies it (via the same
+    `apply_recovery_keys()` from #12) before doing anything else, so a backup made this way is
+    self-sufficient. **Said plainly, once, and then built as asked:** this collapses two
+    independent secrets (archive key + host-only field-encryption key) into one -
+    `BACKUP_ENCRYPTION_KEY` alone, shown right there on the Backups page, now decrypts everything
+    a backup can reach, on any host, indefinitely (no revocation once a key has shipped inside a
+    backup sitting somewhere). The `#12` recovery-key paste flow still exists unchanged as a
+    fallback (needed for pre-`format_version: 3` backups, or a corrupted/missing bundle) and as an
+    opt-back-out path if this trade-off is ever walked back for a specific deployment.
+    - **Verified with the same real cross-instance methodology as #12**: created a fresh backup on
+      the live instance, confirmed `encryption_keys.json` was actually present with the right key
+      ids, restored it onto a *from-scratch* second instance (freshly wiped `sysreptor-test2-*`
+      volumes, its own independently-generated `ENCRYPTION_KEYS` confirmed different beforehand)
+      using **only** the download URL's `.tar.enc` file and `BACKUP_ENCRYPTION_KEY` - no recovery
+      key, no `app.env` touched at all - and got `key_available: true` with zero manual steps, a
+      clean `400 Invalid username or password` on a deliberately-wrong login (real
+      `/api/v1/auth/login/` endpoint, not just an ORM check), surviving a full container restart.
 
 ## Known limitations (unchanged from README, repeated here for completeness)
 
