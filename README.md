@@ -94,7 +94,12 @@ this repo each time - that's the intended way to pick up plugin updates.
 
 ```
 install.sh                  the installer described above
+CONTEXT.md                  project history/handoff brief - the "why", and every bug found+fixed
 plugins/backupmanager/      full plugin source
 plugins/customcss/          full plugin source
 presets/cyberpunk-neon.css  the theme CSS applied automatically on install
 ```
+
+If you're picking this project up on a new machine or a new Claude Code session, read
+`CONTEXT.md` first - it's written as a handoff brief covering the full incident history (every
+non-obvious bug found and fixed), not just install steps.
